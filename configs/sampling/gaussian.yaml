@@ -1,0 +1,19 @@
+# Gaussian Mixture Model Sampler Configuration
+# Based on CL-Splats paper Algorithm 1, 2, and 3
+
+# Number of K-Means clusters for region-based sampling
+num_clusters: 10
+
+# Number of samples to generate per sampling round
+samples_per_round: 100
+
+# Maximum number of sampling rounds
+max_rounds: 10
+
+# Minimum number of points in changed region to use region-based sampling
+# If fewer points exist, use full-scene sampling instead
+min_points_for_region_sampling: 50
+
+# Majority voting threshold: minimum number of views a point must appear in
+# to be considered valid (K in the paper)
+majority_vote_threshold: 2

@@ -1,0 +1,15 @@
+hydra-core>=1.3
+loguru>=0.7
+numpy
+omegaconf==2.3.0
+opencv-python>=4.8
+pillow
+plyfile
+scikit-learn
+torch
+torchvision
+tqdm
+wandb>=0.16
+
+# Optional for Ours acceleration paths:
+# install a platform-compatible FAISS build separately if needed.

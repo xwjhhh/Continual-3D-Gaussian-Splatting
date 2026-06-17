@@ -1,0 +1,24 @@
+# Sphere Pruning Configuration
+# 
+# This configuration defines parameters for sphere-based pruning
+# as described in the CL-Splats paper.
+
+# Minimum number of points required to form a cluster
+# Smaller values create more fine-grained spheres
+# Larger values create fewer, larger spheres
+min_cluster_size: 1000
+
+# Quantile for radius calculation (0-1)
+# Uses the Nth percentile of distances from cluster center
+# 0.98 means the sphere will contain 98% of cluster points
+quantile: 0.98
+
+# Safety multiplier for sphere radius
+# Adds a margin to prevent premature pruning
+# 1.1 means 10% larger than the quantile distance
+radius_multiplier: 1.1
+
+# Pruning frequency (in iterations)
+# How often to check and prune Gaussians
+# Default: 15 (as per paper)
+prune_every: 15

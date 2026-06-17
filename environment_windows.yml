@@ -1,0 +1,70 @@
+# CL-Splats Windows Environment / Windows 环境配置
+# 
+# Usage / 使用方法:
+#   conda env create -f environment_windows.yml
+#   conda activate cl-splats-dev
+#
+# After activation, compile CUDA extensions / 激活后编译 CUDA 扩展:
+#   cd submodules/diff-gaussian-rasterization && pip install -e . --no-build-isolation
+#   cd ../simple-knn && pip install -e . --no-build-isolation
+#
+# Requirements / 系统要求:
+#   - Windows 10/11
+#   - NVIDIA GPU with CUDA 12.1+ support / 支持 CUDA 12.1+ 的 NVIDIA 显卡
+#   - Visual Studio 2019/2022 with C++ build tools / 带 C++ 构建工具的 VS
+
+name: cl-splats-dev
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python core / Python 核心
+  - python=3.11
+  - pip
+  
+  # PyTorch with CUDA 12.1 / PyTorch（CUDA 12.1 版本）
+  - pytorch::pytorch=2.5.1
+  - pytorch::torchvision=0.20.1
+  - pytorch::pytorch-cuda=12.1
+  
+  # Scientific computing / 科学计算
+  - numpy
+  - pillow
+  
+  # Visualization (optional) / 可视化（可选）
+  - matplotlib
+  - scikit-learn
+  
+  # Utilities / 其他工具
+  - pyyaml
+  
+  # Packages installed via pip / 通过 pip 安装的包
+  - pip:
+      # Configuration management / 配置管理
+      - omegaconf==2.3.0
+      - hydra-core>=1.3.0
+      
+      # CLI tools / 命令行工具
+      - tyro==0.9.26
+      - rich==14.0.0
+      
+      # Type checking / 类型检查
+      - torchtyping==0.1.5
+      - typeguard==2.13.3
+      
+      # Logging and monitoring / 日志和监控
+      - loguru>=0.7.0
+      - wandb>=0.16.0
+      
+      # Image processing / 图像处理
+      - opencv-python>=4.8.0
+      
+      # Hugging Face / Hugging Face 相关
+      - huggingface_hub>=0.20.0
+      
+      # Other dependencies / 其他依赖
+      - shtab==1.7.2
+      - docstring-parser==0.16
+      - plyfile
