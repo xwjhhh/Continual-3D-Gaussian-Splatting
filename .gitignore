@@ -40,11 +40,11 @@ tiny-cuda-nn/
 /cl-splats-reproduction-main/
 /tests/
 /Scaffold-GS-main/scene/prototype_state.py
-/clsplats/comparison_video.py
-/clsplats/models/ours_splats.py
-/clsplats/models/prototype_inheritance.py
-/clsplats/utils/prepare_blender_levels.py
-/clsplats/utils/prepare_nerf_synthetic_continual.py
+/ircgs/comparison_video.py
+/ircgs/models/ours_splats.py
+/ircgs/models/prototype_inheritance.py
+/ircgs/utils/prepare_blender_levels.py
+/ircgs/utils/prepare_nerf_synthetic_continual.py
 /render_comparison_videos.sh
 /run_blender_levels.sh
 /run_nerf_synthetic_clnerf_ours_3k.sh

@@ -52,7 +52,7 @@ The public interface contains IRC-GS and four reproducibility baselines only.
 
 ```text
 .
-|-- clsplats/                 # IRC-GS training and evaluation package
+|-- ircgs/                    # IRC-GS training and evaluation package
 |-- configs/irc-gs.yaml       # Default Hydra experiment configuration
 |-- cl-splats-main/           # CL-Splats baseline
 |-- Scaffold-GS-main/         # Scaffold-GS baseline and renderer

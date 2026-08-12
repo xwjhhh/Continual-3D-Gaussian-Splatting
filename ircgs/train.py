@@ -10,9 +10,11 @@ import re
 import shutil
 import sys
 import datetime
+import csv
 import json
 import random
 from argparse import Namespace
+from pathlib import Path
 
 import hydra
 from loguru import logger
@@ -22,6 +24,7 @@ import numpy as np
 import torch
 
 from ircgs.eval import evaluate as run_eval
+from ircgs.history import export_raw_ply, load_raw_ply, recover_state
 from ircgs.models.model_factory import create_trainer
 from ircgs.dataset import CLSplatsDataset
 
@@ -383,6 +386,315 @@ def _run_eval_up_to_timestep(
     }
 
 
+def _load_jsonl_rows(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    rows = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _upsert_metric_row(
+    history_dir: Path,
+    stem: str,
+    row: dict,
+    key_fields: tuple[str, ...],
+    sort_fields: tuple[str, ...],
+) -> tuple[Path, Path]:
+    """Atomically update JSONL and CSV metric tables for resume-safe runs."""
+    history_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = history_dir / f"{stem}.jsonl"
+    csv_path = history_dir / f"{stem}.csv"
+    rows = _load_jsonl_rows(jsonl_path)
+    row_key = tuple(row.get(field) for field in key_fields)
+    rows = [
+        existing
+        for existing in rows
+        if tuple(existing.get(field) for field in key_fields) != row_key
+    ]
+    rows.append(row)
+    rows.sort(key=lambda item: tuple(item.get(field, -1) for field in sort_fields))
+
+    jsonl_tmp = jsonl_path.with_suffix(jsonl_path.suffix + ".tmp")
+    with open(jsonl_tmp, "w", encoding="utf-8") as f:
+        for item in rows:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    os.replace(jsonl_tmp, jsonl_path)
+
+    fieldnames = []
+    for item in rows:
+        for field in item:
+            if field not in fieldnames:
+                fieldnames.append(field)
+    csv_tmp = csv_path.with_suffix(csv_path.suffix + ".tmp")
+    with open(csv_tmp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(csv_tmp, csv_path)
+    return jsonl_path, csv_path
+
+
+def _record_history_storage(
+    cfg: omegaconf.DictConfig,
+    trainer,
+    train_timestep: int,
+    checkpoint_path: str,
+) -> dict:
+    history_dir = Path(trainer.scene_history_dir).expanduser().resolve()
+    checkpoint = Path(checkpoint_path).expanduser().resolve()
+    checkpoint_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    ply_path = Path(checkpoint_payload["ply_path"]).expanduser().resolve()
+    if not ply_path.is_file():
+        raise FileNotFoundError(f"History storage PLY does not exist: {ply_path}")
+
+    records = [
+        record
+        for record in trainer.scene_history.records
+        if int(record.timestep) <= int(train_timestep)
+    ]
+    record_paths = [history_dir / f"t{int(record.timestep):04d}.pt" for record in records]
+    missing_records = [str(path) for path in record_paths if not path.is_file()]
+    if missing_records:
+        raise FileNotFoundError(f"Missing exact-history records: {missing_records}")
+
+    cumulative_history_bytes = sum(path.stat().st_size for path in record_paths)
+    current_record_path = history_dir / f"t{int(train_timestep):04d}.pt"
+    current_record_bytes = (
+        current_record_path.stat().st_size if current_record_path.is_file() else 0
+    )
+    current_ply_bytes = int(ply_path.stat().st_size)
+    compact_scene_bytes = current_ply_bytes + int(cumulative_history_bytes)
+
+    storage_jsonl = history_dir / "storage_metrics.jsonl"
+    existing_rows = _load_jsonl_rows(storage_jsonl)
+    previous_rows = [
+        item
+        for item in existing_rows
+        if int(item.get("train_timestep", -1)) < int(train_timestep)
+    ]
+    previous_row = max(
+        previous_rows,
+        key=lambda item: int(item.get("train_timestep", -1)),
+        default=None,
+    )
+    same_timestep_row = next(
+        (
+            item
+            for item in existing_rows
+            if int(item.get("train_timestep", -1)) == int(train_timestep)
+        ),
+        None,
+    )
+    previous_count = None if previous_row is None else int(previous_row["num_gaussians"])
+    previous_compact = (
+        None if previous_row is None else int(previous_row["compact_scene_bytes"])
+    )
+
+    output_dir = Path(cfg.get("output_dir", "outputs")).expanduser().resolve()
+    snapshot_plys = []
+    for timestep in range(int(train_timestep) + 1):
+        candidate = output_dir / f"checkpoint_t{timestep}.ply"
+        if candidate.is_file():
+            snapshot_plys.append(candidate)
+    full_snapshot_ply_bytes = sum(path.stat().st_size for path in snapshot_plys)
+
+    num_gaussians = int(trainer.gaussians.get_xyz.shape[0])
+    timestep_start_count = int(
+        getattr(
+            trainer,
+            "_timestep_start_gaussian_count",
+            (
+                same_timestep_row.get("start_num_gaussians", num_gaussians)
+                if same_timestep_row is not None
+                else (num_gaussians if previous_count is None else previous_count)
+            ),
+        )
+    )
+    active_start = 0
+    active_end = 0
+    if records and int(records[-1].timestep) == int(train_timestep):
+        active_start = int(records[-1].active_start_mask.sum().item())
+        active_end = int(records[-1].active_end_mask.sum().item())
+
+    row = {
+        "train_timestep": int(train_timestep),
+        "start_num_gaussians": timestep_start_count,
+        "num_gaussians": num_gaussians,
+        "gaussian_delta": num_gaussians - timestep_start_count,
+        "active_start_gaussians": active_start,
+        "active_end_gaussians": active_end,
+        "checkpoint_path": str(checkpoint),
+        "ply_path": str(ply_path),
+        "checkpoint_bytes": int(checkpoint.stat().st_size),
+        "current_ply_bytes": current_ply_bytes,
+        "history_record_bytes": int(current_record_bytes),
+        "cumulative_history_bytes": int(cumulative_history_bytes),
+        "compact_scene_bytes": int(compact_scene_bytes),
+        "compact_growth_bytes": (
+            0 if previous_compact is None else compact_scene_bytes - previous_compact
+        ),
+        "full_snapshot_ply_bytes": int(full_snapshot_ply_bytes),
+        "compact_vs_full_ratio": (
+            float(compact_scene_bytes / full_snapshot_ply_bytes)
+            if full_snapshot_ply_bytes > 0
+            else None
+        ),
+    }
+    _, csv_path = _upsert_metric_row(
+        history_dir,
+        "storage_metrics",
+        row,
+        key_fields=("train_timestep",),
+        sort_fields=("train_timestep",),
+    )
+    mib = 1024.0 * 1024.0
+    logger.info(
+        f"[HistoryStorage] train_t={train_timestep} gaussians={num_gaussians} "
+        f"delta={row['gaussian_delta']:+d} active={active_start}->{active_end} "
+        f"ply_mb={current_ply_bytes / mib:.3f} "
+        f"record_mb={current_record_bytes / mib:.3f} "
+        f"history_mb={cumulative_history_bytes / mib:.3f} "
+        f"compact_mb={compact_scene_bytes / mib:.3f} "
+        f"growth_mb={row['compact_growth_bytes'] / mib:+.3f} csv={csv_path}"
+    )
+    return row
+
+
+def _evaluate_exact_history(
+    cfg: omegaconf.DictConfig,
+    dataset: CLSplatsDataset,
+    trainer,
+    train_timestep: int,
+    checkpoint_path: str,
+) -> list[dict]:
+    """Recover every state through ``train_timestep`` and render its own data."""
+    history_cfg = cfg.get("history", {}) or {}
+    history_dir = Path(trainer.scene_history_dir).expanduser().resolve()
+    recovery_root = history_dir / "recovered" / f"train_t{int(train_timestep):04d}"
+    recovery_root.mkdir(parents=True, exist_ok=True)
+
+    source_checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+    source_checkpoint = torch.load(
+        source_checkpoint_path, map_location="cpu", weights_only=False
+    )
+    current_ply_path = Path(source_checkpoint["ply_path"]).expanduser().resolve()
+    current_params = load_raw_ply(current_ply_path)
+    records = [
+        record
+        for record in trainer.scene_history.records
+        if int(record.timestep) <= int(train_timestep)
+    ]
+    keep_recovered_ply = bool(history_cfg.get("keep_recovered_ply", True))
+    keep_eval_checkpoint = bool(history_cfg.get("keep_eval_checkpoints", False))
+    save_images = bool(history_cfg.get("save_recovery_images", True))
+    force_random_split = _resolve_force_random_split(dataset, cfg)
+    dataset_cfg = cfg.get("dataset", {}) or {}
+    rows = []
+
+    for target_timestep in range(int(train_timestep) + 1):
+        target_dir = recovery_root / f"target_t{target_timestep:04d}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        is_recovered = target_timestep < int(train_timestep)
+        if is_recovered:
+            if not records:
+                raise RuntimeError(
+                    f"Cannot recover target t={target_timestep}: no history records."
+                )
+            target_params = recover_state(
+                current_params, records, target_time=target_timestep
+            )
+            target_ply_path = target_dir / "recovered.ply"
+            export_raw_ply(target_params, target_ply_path)
+        else:
+            target_params = current_params
+            target_ply_path = current_ply_path
+
+        eval_checkpoint_path = target_dir / "_recovery_eval.pt"
+        eval_checkpoint = dict(source_checkpoint)
+        eval_checkpoint["timestep"] = int(target_timestep)
+        eval_checkpoint["ply_path"] = str(target_ply_path.resolve())
+        eval_checkpoint["exact_history_source_timestep"] = int(train_timestep)
+        torch.save(eval_checkpoint, eval_checkpoint_path)
+
+        eval_args = Namespace(
+            dataset_path=str(Path(dataset_cfg.get("path")).expanduser().resolve()),
+            checkpoint=str(eval_checkpoint_path.resolve()),
+            timestep=int(target_timestep),
+            split_seed=dataset_cfg.get("split_seed", 0),
+            force_random_split=bool(force_random_split),
+            resolution_scale=dataset_cfg.get("resolution", 1.0),
+            white_background=bool(
+                cfg.get(
+                    "white_background",
+                    dataset_cfg.get("white_background", False),
+                )
+            ),
+            prefer_undist=bool(dataset_cfg.get("prefer_undist", True)),
+            prefer_dist=not bool(dataset_cfg.get("prefer_undist", True)),
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            allow_resize_mismatch=bool(
+                dataset_cfg.get("allow_resize_mismatch", False)
+            ),
+            output_json=None,
+            verbose=False,
+            enable_legacy_idea3_hash_residual=False,
+            eval_train_split=bool(cfg.get("eval_train_split", False)),
+            save_images=save_images,
+            no_save_gt_images=not save_images,
+            benchmark_fps=False,
+            benchmark_warmup=0,
+            benchmark_repeat=1,
+        )
+
+        try:
+            result = run_eval(eval_args)
+            result_path = target_dir / "metrics.json"
+            with open(result_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            metrics = result["metrics"]
+            row = {
+                "train_timestep": int(train_timestep),
+                "target_timestep": int(target_timestep),
+                "rollback_steps": int(train_timestep) - int(target_timestep),
+                "is_recovered": bool(is_recovered),
+                "num_gaussians": int(target_params["xyz"].shape[0]),
+                "ply_path": str(target_ply_path.resolve()),
+                "ply_bytes": int(target_ply_path.stat().st_size),
+                "psnr": float(metrics["psnr"]),
+                "ssim": float(metrics["ssim"]),
+                "l1": float(metrics["l1"]),
+                "num_evaluated_views": int(result["num_evaluated_views"]),
+                "render_dir": result.get("saved_test_images_dir"),
+                "metrics_path": str(result_path.resolve()),
+            }
+            _, csv_path = _upsert_metric_row(
+                history_dir,
+                "recovery_metrics",
+                row,
+                key_fields=("train_timestep", "target_timestep"),
+                sort_fields=("train_timestep", "target_timestep"),
+            )
+            logger.info(
+                f"[HistoryRecovery] train_t={train_timestep} target_t={target_timestep} "
+                f"steps={row['rollback_steps']} gaussians={row['num_gaussians']} "
+                f"PSNR={row['psnr']:.4f} SSIM={row['ssim']:.6f} "
+                f"L1={row['l1']:.6f} renders={row['render_dir']} csv={csv_path}"
+            )
+            rows.append(row)
+        finally:
+            if not keep_eval_checkpoint and eval_checkpoint_path.exists():
+                eval_checkpoint_path.unlink()
+            if is_recovered and not keep_recovered_ply and target_ply_path.exists():
+                target_ply_path.unlink()
+
+    return rows
+
+
 def _cleanup_dated_output_dirs(output_dir: str) -> list[str]:
     removed_dirs: list[str] = []
     if not os.path.isdir(output_dir):
@@ -432,7 +744,7 @@ def setup_wandb(cfg: omegaconf.DictConfig) -> None:
         return
     
     wandb.init(
-        project=cfg.get("wandb_project", "cl-splats"),
+        project=cfg.get("wandb_project", "irc-gs"),
         name=cfg.get("wandb_run_name", None),
         config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
         mode=wandb_mode,
@@ -568,6 +880,9 @@ def main(cfg: omegaconf.DictConfig) -> None:
     trainer_supports_builtin_eval = bool(
         getattr(trainer, "supports_builtin_eval", True)
     )
+    trainer_eval_after_training_only = bool(
+        getattr(trainer, "eval_after_training_only", False)
+    )
     if hasattr(trainer, "_dataset_for_test_render"):
         trainer._dataset_for_test_render = dataset
     if hasattr(trainer, "_force_random_split_for_dataset"):
@@ -592,6 +907,20 @@ def main(cfg: omegaconf.DictConfig) -> None:
             "Built-in eval is disabled for the selected trainer; "
             "train.py will skip automatic eval checkpoints for this run."
         )
+    history_cfg = cfg.get("history", {}) or {}
+    exact_history_enabled = bool(
+        history_cfg.get("log_history", False)
+        and getattr(trainer, "supports_exact_history", False)
+        and getattr(trainer, "scene_history_enabled", False)
+    )
+    exact_history_eval_enabled = bool(
+        exact_history_enabled and history_cfg.get("eval_recovered", True)
+    )
+    if exact_history_enabled:
+        logger.info(
+            "Exact CL-Splats history enabled: every timestep will retain its "
+            "active delta and a full checkpoint for inspection."
+        )
     
     # Load checkpoint if resuming
     checkpoint_path = cfg.get("resume_from", None)
@@ -605,7 +934,28 @@ def main(cfg: omegaconf.DictConfig) -> None:
 
         # Run an initial eval immediately after resume, before any new training.
         resume_train_timestep = int(getattr(trainer, "timestep", 0))
-        if trainer_supports_builtin_eval:
+        if exact_history_enabled:
+            _record_history_storage(
+                cfg=cfg,
+                trainer=trainer,
+                train_timestep=resume_train_timestep,
+                checkpoint_path=resume_checkpoint_path,
+            )
+            if exact_history_eval_enabled:
+                logger.info(
+                    f"[HistoryRecovery] Resume validation for train_t={resume_train_timestep}"
+                )
+                _evaluate_exact_history(
+                    cfg=cfg,
+                    dataset=dataset,
+                    trainer=trainer,
+                    train_timestep=resume_train_timestep,
+                    checkpoint_path=resume_checkpoint_path,
+                )
+        elif (
+            trainer_supports_builtin_eval
+            and not trainer_eval_after_training_only
+        ):
             logger.info(
                 f"[Eval] Resume init: evaluate checkpoint at train timestep {resume_train_timestep}"
             )
@@ -627,6 +977,14 @@ def main(cfg: omegaconf.DictConfig) -> None:
                         "[EvalHook] trainer.on_post_eval failed during resume init eval"
                     )
     else:
+        if exact_history_enabled:
+            stale_records = sorted(Path(trainer.scene_history_dir).glob("t*.pt"))
+            if stale_records:
+                raise RuntimeError(
+                    "Refusing to start a fresh run with existing exact-history "
+                    f"records in {trainer.scene_history_dir}. Resume from the "
+                    "matching checkpoint or use a new output_dir."
+                )
         # Initialize Gaussians from first timestep point cloud
         scene_info = dataset.get_scene_info(0)
         if scene_info.point_cloud is not None:
@@ -673,7 +1031,7 @@ def main(cfg: omegaconf.DictConfig) -> None:
         os.makedirs(output_dir, exist_ok=True)
 
         checkpoint_is_temporary = False
-        if (timestep + 1) % save_interval == 0:
+        if exact_history_enabled or (timestep + 1) % save_interval == 0:
             ckpt_path = os.path.join(output_dir, f"checkpoint_t{timestep}.pt")
         else:
             ckpt_path = os.path.join(
@@ -682,7 +1040,22 @@ def main(cfg: omegaconf.DictConfig) -> None:
             checkpoint_is_temporary = True
 
         trainer.save_checkpoint(ckpt_path, save_external_ply=False)
-        if trainer_supports_builtin_eval:
+        if exact_history_enabled:
+            _record_history_storage(
+                cfg=cfg,
+                trainer=trainer,
+                train_timestep=timestep,
+                checkpoint_path=ckpt_path,
+            )
+        if exact_history_eval_enabled:
+            _evaluate_exact_history(
+                cfg=cfg,
+                dataset=dataset,
+                trainer=trainer,
+                train_timestep=timestep,
+                checkpoint_path=ckpt_path,
+            )
+        elif trainer_supports_builtin_eval and not trainer_eval_after_training_only:
             eval_summary = _run_eval_up_to_timestep(
                 cfg,
                 timestep,
@@ -703,13 +1076,6 @@ def main(cfg: omegaconf.DictConfig) -> None:
 
         if checkpoint_is_temporary:
             _cleanup_temp_eval_checkpoint(ckpt_path, eval_log_dir)
-        elif ckpt_path.endswith(".pt"):
-            prev_ckpt_path = os.path.join(output_dir, f"checkpoint_t{timestep - save_interval}.pt")
-            if timestep - save_interval >= start_time and os.path.exists(prev_ckpt_path):
-                try:
-                    os.remove(prev_ckpt_path)
-                except OSError:
-                    logger.warning(f"Failed to remove stale checkpoint: {prev_ckpt_path}")
 
         logger.info(f"Timestep {timestep} complete: loss={stats['avg_loss']:.6f}, gaussians={stats['num_gaussians']}")
     
@@ -724,11 +1090,42 @@ def main(cfg: omegaconf.DictConfig) -> None:
     logger.info(f"Saved final point cloud to {final_ply_path}")
 
     final_ckpt_path = os.path.join(output_dir, "checkpoint_final.pt")
-    trainer.save_checkpoint(
-        final_ckpt_path,
-        ply_path_override=final_ply_path,
-        save_external_ply=False,
-    )
+    try:
+        trainer.save_checkpoint(
+            final_ckpt_path,
+            ply_path_override=final_ply_path,
+            save_external_ply=False,
+            compact_for_eval=True,
+        )
+    except TypeError:
+        trainer.save_checkpoint(
+            final_ckpt_path,
+            ply_path_override=final_ply_path,
+            save_external_ply=False,
+        )
+
+    if trainer_supports_builtin_eval and trainer_eval_after_training_only:
+        final_eval_timestep = int(getattr(trainer, "timestep", max(num_times - 1, 0)))
+        logger.info(
+            f"[Eval] Final-only trainer: evaluate final checkpoint at train timestep {final_eval_timestep}"
+        )
+        final_eval_summary = _run_eval_up_to_timestep(
+            cfg,
+            final_eval_timestep,
+            final_ckpt_path,
+            eval_log_path,
+            force_random_split=_resolve_force_random_split(dataset, cfg),
+        )
+        if hasattr(trainer, "on_post_eval"):
+            try:
+                trainer.on_post_eval(
+                    train_timestep=final_eval_timestep,
+                    eval_summary=final_eval_summary,
+                )
+            except Exception:
+                logger.exception(
+                    "[EvalHook] trainer.on_post_eval failed during final-only eval"
+                )
     
     # Cleanup
     if wandb.run is not None:

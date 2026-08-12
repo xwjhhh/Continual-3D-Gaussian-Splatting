@@ -1,4 +1,0 @@
-# Majority Vote Lifter Configuration
-# 2D→3D lifting using multi-view consistency
-
-vote_threshold: 2  # Minimum number of views a point must appear in

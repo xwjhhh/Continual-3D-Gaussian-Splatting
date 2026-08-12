@@ -9,7 +9,7 @@ closer to runnable out of the box:
 - `Scaffold-GS-main/`
 - `4DGaussians-master/`
 
-The 3DGS baseline is implemented through `clsplats/models/pure_3dgs.py`
+The 3DGS baseline is implemented through `ircgs/models/pure_3dgs.py`
 plus the local 3DGS representation/rendering code and the bundled CUDA
 extensions above.
 

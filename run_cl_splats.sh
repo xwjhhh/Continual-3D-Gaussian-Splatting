@@ -412,7 +412,7 @@ test_images_root = important_dir / "test_images"
 test_images_root.mkdir(parents=True, exist_ok=True)
 
 try:
-    from clsplats.dataset import CLSplatsDataset  # type: ignore
+    from ircgs.dataset import CLSplatsDataset  # type: ignore
 
     dataset = CLSplatsDataset(
         path=str(dataset_path),
@@ -650,7 +650,7 @@ for SCENE in "${SCENES[@]}"; do
     fi
 
     TRAIN_CMD=(
-      "${PYTHON_BIN}" -m clsplats.train
+      "${PYTHON_BIN}" -m ircgs.train
       "++dataset.path=${DATASET_PATH}"
       "++dataset.type=colmap"
       "++dataset.resolution=1.0"
@@ -733,7 +733,7 @@ for SCENE in "${SCENES[@]}"; do
       EVAL_EXTRA_ARGS+=(--eval-train-split)
     fi
 
-    "${PYTHON_BIN}" -m clsplats.eval \
+    "${PYTHON_BIN}" -m ircgs.eval \
       --dataset-path "${DATASET_PATH}" \
       --checkpoint "${CKPT_PATH}" \
       --timestep "${t}" \
