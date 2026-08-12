@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="IRC-GS qualitative comparison on the Community scene.">
+  <meta name="description" content="IRC-GS qualitative comparison videos across six scenes.">
   <meta name="theme-color" content="#111614">
-  <title>IRC-GS | Community</title>
+  <title>IRC-GS | Qualitative Results</title>
   <style>
     :root {
       color-scheme: light;
@@ -121,6 +121,42 @@
       line-height: 1.65;
     }
 
+    .scene-nav {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      margin: 0 0 18px;
+      padding: 2px 0 8px;
+      scrollbar-width: thin;
+    }
+
+    .scene-nav a {
+      flex: none;
+      min-height: 38px;
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 8px 13px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .scene-nav a:hover,
+    .scene-nav a:focus-visible {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .scene-nav a[aria-current="true"] {
+      border-color: var(--ink);
+      background: var(--ink);
+      color: #ffffff;
+    }
+
     .viewer {
       overflow: hidden;
       border: 1px solid #222a27;
@@ -185,6 +221,7 @@
       .heading {
         grid-template-columns: 1fr;
         gap: 20px;
+        margin-bottom: 24px;
       }
 
       h1 {
@@ -224,15 +261,24 @@
       </p>
     </section>
 
-    <section aria-label="Community comparison video">
+    <nav class="scene-nav" aria-label="Select a comparison scene">
+      <a href="#breville" data-scene="breville">Breville</a>
+      <a href="#car" data-scene="car">Car</a>
+      <a href="#community" data-scene="community">Community</a>
+      <a href="#grill" data-scene="grill">Grill</a>
+      <a href="#living-room" data-scene="living-room">Living Room</a>
+      <a href="#street" data-scene="street">Street</a>
+    </nav>
+
+    <section id="video-section" aria-label="Community comparison video">
       <div class="viewer">
-        <video controls playsinline preload="metadata">
+        <video id="comparison-video" controls playsinline preload="metadata">
           <source src="https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/community.mp4" type="video/mp4">
           Your browser does not support HTML5 video.
         </video>
       </div>
       <div class="caption">
-        <span><strong>Scene:</strong> Community</span>
+        <span><strong>Scene:</strong> <span id="scene-caption">Community</span></span>
         <span>IRC-GS qualitative result</span>
       </div>
     </section>
@@ -242,5 +288,47 @@
     <span>Inheritance, Revision, and Consolidation for Continual 3D Gaussian Splatting</span>
     <a href="https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting">Source code</a>
   </footer>
+  <script>
+    const scenes = {
+      "breville": { label: "Breville", file: "breville.mp4" },
+      "car": { label: "Car", file: "car.mp4" },
+      "community": { label: "Community", file: "community.mp4" },
+      "grill": { label: "Grill", file: "grill.mp4" },
+      "living-room": { label: "Living Room", file: "living_room.mp4" },
+      "street": { label: "Street", file: "street.mp4" }
+    };
+    const mediaRoot = "https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/";
+    const video = document.getElementById("comparison-video");
+    const source = video.querySelector("source");
+    const title = document.getElementById("page-title");
+    const caption = document.getElementById("scene-caption");
+    const section = document.getElementById("video-section");
+    const links = document.querySelectorAll("[data-scene]");
+
+    function selectScene() {
+      const key = location.hash.slice(1).toLowerCase();
+      const selectedKey = Object.hasOwn(scenes, key) ? key : "community";
+      const scene = scenes[selectedKey];
+      const nextSource = mediaRoot + scene.file;
+
+      if (source.src !== nextSource) {
+        source.src = nextSource;
+        video.load();
+      }
+
+      title.textContent = scene.label;
+      caption.textContent = scene.label;
+      section.setAttribute("aria-label", scene.label + " comparison video");
+      document.title = "IRC-GS | " + scene.label;
+
+      links.forEach((link) => {
+        const active = link.dataset.scene === selectedKey;
+        link.setAttribute("aria-current", active ? "true" : "false");
+      });
+    }
+
+    window.addEventListener("hashchange", selectScene);
+    selectScene();
+  </script>
 </body>
 </html>

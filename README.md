@@ -25,9 +25,16 @@ full-resolution result.
 
 | Scene | Video | Scene | Video |
 |:--|:--:|:--|:--:|
-| Breville | [MP4](videos/breville.mp4) | Car | [MP4](videos/car.mp4) |
-| Community | [Watch online](https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html) / [MP4](videos/community.mp4) | Grill | [MP4](videos/grill.mp4) |
-| Living room | [MP4](videos/living_room.mp4) | Street | [MP4](videos/street.mp4) |
+| Breville | [Watch online][watch-breville] / [MP4](videos/breville.mp4) | Car | [Watch online][watch-car] / [MP4](videos/car.mp4) |
+| Community | [Watch online][watch-community] / [MP4](videos/community.mp4) | Grill | [Watch online][watch-grill] / [MP4](videos/grill.mp4) |
+| Living room | [Watch online][watch-living-room] / [MP4](videos/living_room.mp4) | Street | [Watch online][watch-street] / [MP4](videos/street.mp4) |
+
+[watch-breville]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#breville
+[watch-car]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#car
+[watch-community]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#community
+[watch-grill]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#grill
+[watch-living-room]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#living-room
+[watch-street]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#street
 
 ## Supported Methods
 
