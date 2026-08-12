@@ -2,6 +2,7 @@
 .vscode
 temp*
 !scene/temporal_state.py
+!utils/temporal_utils.py
 outputs*
 debug*
 log*
