@@ -135,7 +135,14 @@ def _frame_fovs_for_image(
 def _link_or_copy(src: Path, dst: Path, prefer_link: bool) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
-        return
+        try:
+            # A hardlink remains valid when the source is updated in place.
+            # Regenerate ordinary copies from stale 4DGS input directories.
+            if os.path.samefile(src, dst):
+                return
+        except OSError:
+            pass
+        dst.unlink()
     if prefer_link:
         try:
             os.link(src, dst)
@@ -143,6 +150,42 @@ def _link_or_copy(src: Path, dst: Path, prefer_link: bool) -> None:
         except OSError:
             pass
     shutil.copy2(src, dst)
+
+
+def _scaled_image_size(size: tuple[int, int], scale: float) -> tuple[int, int]:
+    image_w, image_h = int(size[0]), int(size[1])
+    if not math.isfinite(float(scale)) or float(scale) <= 0.0:
+        raise ValueError(f"4DGS image_scale must be positive, got {scale!r}")
+    return (
+        max(1, int(round(float(image_w) * float(scale)))),
+        max(1, int(round(float(image_h) * float(scale)))),
+    )
+
+
+def _prepare_4dgs_image(
+    src: Path,
+    dst: Path,
+    prefer_link: bool,
+    image_scale: float,
+) -> tuple[int, int]:
+    """Materialize one generated input image and return its actual size."""
+    with Image.open(src) as image:
+        source_size = image.size
+        target_size = _scaled_image_size(source_size, image_scale)
+
+        if target_size == source_size:
+            _link_or_copy(src, dst, prefer_link)
+            return target_size
+
+        # Scaled images must be real files, not hardlinks. Always refresh them
+        # so a previous failed run cannot leave an old-resolution image behind.
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        rgb_image = image.convert("RGB").resize(
+            target_size,
+            getattr(getattr(Image, "Resampling", Image), "LANCZOS"),
+        )
+        rgb_image.save(dst)
+        return target_size
 
 
 def _write_empty_ply(path: Path) -> None:
@@ -182,6 +225,87 @@ def _store_4dgs_ply(path: Path, xyz: np.ndarray, rgb: np.ndarray) -> None:
     attributes = np.concatenate((xyz, normals, rgb), axis=1)
     elements[:] = list(map(tuple, attributes))
     PlyData([PlyElement.describe(elements, "vertex")]).write(str(path))
+
+
+def _voxel_downsample_point_cloud(
+    xyz: np.ndarray,
+    rgb: np.ndarray,
+    max_points: int,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Voxel-average a point cloud to the initialization budget used by 4DGS."""
+    xyz = np.asarray(xyz, dtype=np.float64)
+    rgb = np.asarray(rgb, dtype=np.float64)
+    max_points = int(max_points)
+    if max_points <= 0 or xyz.shape[0] <= max_points:
+        return xyz, rgb, 0.0
+
+    span = np.ptp(xyz, axis=0)
+    active_span = span[span > 1e-12]
+    effective_dim = max(1, int(active_span.shape[0]))
+    occupied_measure = float(np.prod(active_span)) if active_span.size else 1.0
+    voxel_size = max(
+        (occupied_measure / float(max_points)) ** (1.0 / effective_dim),
+        1e-6,
+    )
+    origin = xyz.min(axis=0)
+
+    def _assign(size: float) -> tuple[np.ndarray, int]:
+        voxel_coords = np.floor((xyz - origin[None, :]) / size).astype(np.int64)
+        _, inverse_indices = np.unique(voxel_coords, axis=0, return_inverse=True)
+        return inverse_indices, int(inverse_indices.max()) + 1
+
+    inverse, num_voxels = _assign(voxel_size)
+    low_size: Optional[float] = None
+    high_size: Optional[float] = None
+    high_inverse: Optional[np.ndarray] = None
+
+    if num_voxels <= max_points:
+        high_size, high_inverse = voxel_size, inverse
+        for _ in range(24):
+            candidate = max(high_size / 1.5, 1e-9)
+            candidate_inverse, candidate_count = _assign(candidate)
+            if candidate_count > max_points:
+                low_size = candidate
+                break
+            high_size, high_inverse = candidate, candidate_inverse
+            if candidate_count == xyz.shape[0] or candidate <= 1e-9:
+                break
+    else:
+        low_size = voxel_size
+        for _ in range(24):
+            growth = (float(num_voxels) / float(max_points)) ** (1.0 / effective_dim)
+            voxel_size *= max(1.05, growth * 1.01)
+            inverse, num_voxels = _assign(voxel_size)
+            if num_voxels <= max_points:
+                high_size, high_inverse = voxel_size, inverse
+                break
+            low_size = voxel_size
+
+    if high_size is None or high_inverse is None:
+        raise RuntimeError(
+            f"Could not voxel-downsample {xyz.shape[0]} points to at most {max_points}."
+        )
+
+    if low_size is not None:
+        for _ in range(10):
+            candidate = 0.5 * (low_size + high_size)
+            candidate_inverse, candidate_count = _assign(candidate)
+            if candidate_count > max_points:
+                low_size = candidate
+            else:
+                high_size, high_inverse = candidate, candidate_inverse
+
+    counts = np.bincount(high_inverse)
+    num_voxels = int(counts.shape[0])
+    xyz_sum = np.zeros((num_voxels, 3), dtype=np.float64)
+    rgb_sum = np.zeros((num_voxels, 3), dtype=np.float64)
+    np.add.at(xyz_sum, high_inverse, xyz)
+    np.add.at(rgb_sum, high_inverse, rgb)
+    return (
+        xyz_sum / counts[:, None],
+        rgb_sum / counts[:, None],
+        float(high_size),
+    )
 
 
 class FourDGSTrainer:
@@ -233,6 +357,12 @@ class FourDGSTrainer:
         self._source_dir = Path(source_dir) if source_dir else None
         self._model_path = Path(model_path) if model_path else None
         self._last_command = list(checkpoint.get("command", []))
+        normalization = checkpoint.get("normalization", None)
+        if isinstance(normalization, dict):
+            self._normalization = dict(normalization)
+        self._num_train_frames = int(checkpoint.get("num_train_frames", 0))
+        self._num_test_frames = int(checkpoint.get("num_test_frames", 0))
+        self._image_extension = str(checkpoint.get("image_extension", ".png") or ".png")
         logger.info(f"Loaded 4DGS bridge checkpoint from {path}")
 
     def prepare_timestep(self, timestep: int, dataset) -> None:
@@ -331,7 +461,14 @@ class FourDGSTrainer:
     def _resolve_num_times(self, dataset) -> int:
         train_cfg = self.cfg.get("train", {})
         requested = int(_cfg_get(train_cfg, "num_times", dataset.get_num_timesteps()))
-        return max(1, min(requested, int(dataset.get_num_timesteps())))
+        available = int(dataset.get_num_timesteps())
+        if requested > available:
+            logger.warning(
+                "4DGS requested more timesteps than the dataset exposes; "
+                f"requested={requested}, available={available}. "
+                "The generated input will contain only the available timesteps."
+            )
+        return max(1, min(requested, available))
 
     def _resolve_generated_dir(self, dataset) -> Path:
         configured = _cfg_get(self.fourdgs_cfg, "generated_data_dir", None)
@@ -351,15 +488,21 @@ class FourDGSTrainer:
         extension = str(_cfg_get(self.fourdgs_cfg, "extension", "") or "")
         normalize_scene = bool(_cfg_get(self.fourdgs_cfg, "normalize_scene", True))
         target_radius = float(_cfg_get(self.fourdgs_cfg, "normalization_radius", 1.0))
-        radius_percentile = float(_cfg_get(self.fourdgs_cfg, "normalization_percentile", 95.0))
         max_normalized_radius = float(_cfg_get(self.fourdgs_cfg, "normalization_max_radius", 3.0))
+        initial_point_max_points = int(
+            _cfg_get(self.fourdgs_cfg, "initial_point_max_points", 40_000)
+        )
         intrinsics_scale = float(_cfg_get(self.fourdgs_cfg, "intrinsics_scale", 1.0))
+        image_scale = float(_cfg_get(self.fourdgs_cfg, "image_scale", 1.0))
+        if not math.isfinite(image_scale) or image_scale <= 0.0:
+            raise ValueError(
+                f"model.fourdgs.image_scale must be positive, got {image_scale!r}"
+            )
         norm_center, norm_scale, norm_radius = self._compute_scene_normalization(
             dataset,
             num_times=num_times,
             enabled=normalize_scene,
             target_radius=target_radius,
-            radius_percentile=radius_percentile,
         )
 
         train_frames: List[dict] = []
@@ -382,13 +525,14 @@ class FourDGSTrainer:
                     continue
                 try:
                     with Image.open(src) as image_probe:
-                        image_size = image_probe.size
+                        source_image_size = image_probe.size
                 except Exception:
                     logger.warning(f"Could not inspect 4DGS input image size, using camera metadata: {src}")
-                    image_size = (
+                    source_image_size = (
                         int(getattr(cam_info, "width", 1) or 1),
                         int(getattr(cam_info, "height", 1) or 1),
                     )
+                image_size = _scaled_image_size(source_image_size, image_scale)
                 frame_fovx, frame_fovy = _frame_fovs_for_image(
                     cam_info,
                     image_size=image_size,
@@ -398,6 +542,7 @@ class FourDGSTrainer:
                     logger.info(
                         "4DGS frame intrinsics: "
                         f"path={src.name}, "
+                        f"source_image={source_image_size[0]}x{source_image_size[1]}, "
                         f"image={image_size[0]}x{image_size[1]}, "
                         f"camera_meta={getattr(cam_info, 'width', '?')}x{getattr(cam_info, 'height', '?')}, "
                         f"focal=({getattr(cam_info, 'focal_x', None)}, {getattr(cam_info, 'focal_y', None)}), "
@@ -412,7 +557,12 @@ class FourDGSTrainer:
                     copied_suffix = suffix
                 dst_rel_no_ext = f"images/t{timestep:04d}_{local_idx:05d}"
                 dst = source_dir / f"{dst_rel_no_ext}{copied_suffix}"
-                _link_or_copy(src, dst, prefer_hardlinks)
+                _prepare_4dgs_image(
+                    src,
+                    dst,
+                    prefer_link=prefer_hardlinks,
+                    image_scale=image_scale,
+                )
 
                 frame = {
                     "file_path": dst_rel_no_ext,
@@ -430,7 +580,7 @@ class FourDGSTrainer:
                 else:
                     train_frames.append(frame)
                 if first_fovx is None:
-                    first_fovx = float(cam_info.FovX)
+                    first_fovx = float(frame_fovx)
 
         if not train_frames:
             raise RuntimeError("No train frames were collected for 4DGS.")
@@ -448,30 +598,35 @@ class FourDGSTrainer:
             center=norm_center,
             scale=norm_scale,
             max_normalized_radius=max_normalized_radius if norm_center is not None else None,
+            max_points=initial_point_max_points,
         )
 
         self._normalization = {
             "enabled": bool(norm_center is not None),
+            "mode": "camera_extent",
             "center": None if norm_center is None else [float(v) for v in norm_center.tolist()],
             "scale": float(norm_scale),
             "radius": None if norm_radius is None else float(norm_radius),
             "target_radius": float(target_radius),
-            "radius_percentile": float(radius_percentile),
             "max_normalized_radius": float(max_normalized_radius),
         }
+        (source_dir / "normalization.json").write_text(
+            json.dumps(self._normalization, indent=2),
+            encoding="utf-8",
+        )
 
         self._num_train_frames = len(train_frames)
         self._num_test_frames = len(test_frames)
         logger.info(
             f"Prepared 4DGS all-time input at {source_dir}: "
             f"{len(train_frames)} train frames, {len(test_frames)} test frames, "
-            f"timesteps=0..{num_times - 1}"
+            f"timesteps=0..{num_times - 1}, image_scale={image_scale:.4f}"
         )
         if norm_center is not None:
             logger.info(
                 "4DGS input normalization enabled: "
                 f"center={self._normalization['center']}, "
-                f"radius_p{radius_percentile:g}={self._normalization['radius']:.6f}, "
+                f"camera_radius={self._normalization['radius']:.6f}, "
                 f"scale={self._normalization['scale']:.8f}"
             )
         return source_dir
@@ -490,14 +645,12 @@ class FourDGSTrainer:
         num_times: int,
         enabled: bool,
         target_radius: float,
-        radius_percentile: float,
     ) -> tuple[Optional[np.ndarray], float, Optional[float]]:
         if not enabled:
             return None, 1.0, None
         try:
-            samples: List[np.ndarray] = []
             point_count = 0
-            camera_count = 0
+            camera_centers: List[np.ndarray] = []
 
             for timestep in range(max(1, int(num_times))):
                 scene_info = dataset.get_scene_info(timestep)
@@ -508,37 +661,40 @@ class FourDGSTrainer:
                         finite = np.isfinite(points).all(axis=1)
                         points = points[finite]
                         if points.size > 0:
-                            samples.append(points)
                             point_count += int(points.shape[0])
 
                 cameras = list(getattr(scene_info, "train_cameras", []))
-                cameras += list(getattr(scene_info, "test_cameras", []))
-                centers = []
+                if not cameras:
+                    cameras = list(getattr(scene_info, "test_cameras", []))
                 for cam_info in cameras:
                     w2c = np.eye(4, dtype=np.float64)
                     w2c[:3, :3] = np.asarray(cam_info.R, dtype=np.float64).T
                     w2c[:3, 3] = np.asarray(cam_info.T, dtype=np.float64)
                     center = np.linalg.inv(w2c)[:3, 3]
                     if np.isfinite(center).all():
-                        centers.append(center)
-                if centers:
-                    samples.append(np.asarray(centers, dtype=np.float64))
-                    camera_count += len(centers)
+                        camera_centers.append(center)
 
-            if not samples:
+            if not camera_centers:
                 return None, 1.0, None
-            points = np.concatenate(samples, axis=0)
-            center = np.median(points, axis=0)
-            distances = np.linalg.norm(points - center[None, :], axis=1)
-            percentile = float(np.clip(radius_percentile, 50.0, 100.0))
-            radius = float(np.percentile(distances, percentile))
+
+            # Match the normalization convention used by upstream 3DGS/4DGS:
+            # center the training camera bank and scale its farthest camera to
+            # 1 / 1.1.  Using a dense MVS point-cloud percentile here can make
+            # a few distant reconstruction outliers compress the actual scene
+            # into only one or two HexPlane cells (notably WAT Car and Grill).
+            centers = np.asarray(camera_centers, dtype=np.float64)
+            center = np.mean(centers, axis=0)
+            camera_distances = np.linalg.norm(centers - center[None, :], axis=1)
+            radius = float(camera_distances.max(initial=0.0) * 1.1)
             if radius <= 1e-12:
                 return None, 1.0, None
             scale = float(target_radius) / radius
             logger.info(
-                "Computed global 4DGS normalization from all requested timesteps: "
-                f"points={point_count}, camera_centers={camera_count}, "
-                f"timesteps={max(1, int(num_times))}"
+                "Computed 4DGS camera-extent normalization from all requested timesteps: "
+                f"points_seen={point_count}, camera_centers={len(camera_centers)}, "
+                f"camera_radius={radius:.6f}, scale={scale:.8f}, "
+                f"timesteps={max(1, int(num_times))}. "
+                "Dense point-cloud outliers do not determine the HexPlane scale."
             )
             return center, scale, radius
         except Exception:
@@ -552,6 +708,7 @@ class FourDGSTrainer:
         center: Optional[np.ndarray] = None,
         scale: float = 1.0,
         max_normalized_radius: Optional[float] = None,
+        max_points: int = 0,
     ) -> None:
         try:
             scene_info = dataset.get_scene_info(0)
@@ -569,6 +726,19 @@ class FourDGSTrainer:
                         )
                         xyz = xyz[keep]
                         rgb = rgb[keep]
+                original_count = int(xyz.shape[0])
+                xyz, rgb, voxel_size = _voxel_downsample_point_cloud(
+                    xyz,
+                    rgb,
+                    max_points=max_points,
+                )
+                if xyz.shape[0] < original_count:
+                    logger.info(
+                        "Voxel-downsampled 4DGS initialization point cloud: "
+                        f"kept={int(xyz.shape[0])}/{original_count}, "
+                        f"max_points={int(max_points)}, voxel_size={voxel_size:.8f}. "
+                        "This matches the upstream multiple-view preprocessing budget."
+                    )
                 _store_4dgs_ply(source_dir / "fused.ply", xyz, rgb)
                 return
             ply_path = Path(str(scene_info.ply_path))
@@ -589,7 +759,7 @@ class FourDGSTrainer:
         ip = str(_cfg_get(self.fourdgs_cfg, "ip", "127.0.0.1"))
         configs = _cfg_get(self.fourdgs_cfg, "configs", None)
         if configs is None:
-            default_configs = self.root / "arguments" / "multipleview" / "default.py"
+            default_configs = self.root / "arguments" / "dnerf" / "wat_default.py"
             if default_configs.is_file():
                 configs = str(default_configs)
         extension = str(_cfg_get(self.fourdgs_cfg, "extension", "") or "")
@@ -613,11 +783,19 @@ class FourDGSTrainer:
             "--extension",
             extension,
         ]
+        # WAT is a real RGB capture dataset.  4DGaussians' ModelParams
+        # defaults to a white background for synthetic scenes; make the
+        # bridge's dataset setting explicit so uncovered pixels do not incur a
+        # large white-vs-black error during training/evaluation.
+        dataset_cfg = self.cfg.get("dataset", {})
+        if bool(_cfg_get(dataset_cfg, "white_background", False)):
+            cmd.append("--white_background")
+        else:
+            cmd.append("--black_background")
         if configs:
             cmd.extend(["--configs", str(configs)])
 
-        train_cfg = self.cfg.get("train", {})
-        iterations = _cfg_get(self.fourdgs_cfg, "iterations", _cfg_get(train_cfg, "iterations", None))
+        iterations = _cfg_get(self.fourdgs_cfg, "iterations", None)
         if iterations is not None:
             cmd.extend(["--iterations", str(int(iterations))])
         coarse_iterations = _cfg_get(self.fourdgs_cfg, "coarse_iterations", None)
@@ -629,10 +807,9 @@ class FourDGSTrainer:
         if coarse_first_timestep_only:
             cmd.append("--coarse_first_timestep_only")
 
-        opacity_reset_interval = int(
-            _cfg_get(self.fourdgs_cfg, "opacity_reset_interval", 1_000_000_000)
-        )
-        cmd.extend(["--opacity_reset_interval", str(opacity_reset_interval)])
+        opacity_reset_interval = _cfg_get(self.fourdgs_cfg, "opacity_reset_interval", None)
+        if opacity_reset_interval is not None:
+            cmd.extend(["--opacity_reset_interval", str(int(opacity_reset_interval))])
 
         cmd.extend(_as_list(_cfg_get(self.fourdgs_cfg, "extra_args", [])))
         return cmd
@@ -640,7 +817,30 @@ class FourDGSTrainer:
     def _should_skip_existing_output(self) -> bool:
         if not bool(_cfg_get(self.fourdgs_cfg, "skip_if_output_exists", True)):
             return False
-        return self._find_latest_4dgs_ply() is not None
+        if self._model_path is None:
+            return False
+        final_iteration = int(
+            _cfg_get(
+                self.fourdgs_cfg,
+                "iterations",
+                30_000,
+            )
+        )
+        final_ply = (
+            self._model_path
+            / "point_cloud"
+            / f"iteration_{final_iteration}"
+            / "point_cloud.ply"
+        )
+        if final_ply.is_file():
+            return True
+        partial = self._find_latest_4dgs_ply()
+        if partial is not None:
+            logger.warning(
+                "Found partial 4DGS output without the final fine PLY; "
+                f"will retrain instead of skipping: {partial}"
+            )
+        return False
 
     def _find_latest_4dgs_ply(self) -> Optional[Path]:
         if self._model_path is None:

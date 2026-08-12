@@ -15,6 +15,7 @@ import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.graphics_utils import geom_transform_points
+from utils.temporal_utils import blend_observed_rows
 
 def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask=None, is_training=False):
     ## view frustum filtering for acceleration    
@@ -74,8 +75,20 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
         if temporal_feature_input is not None:
             visible_feature_input = temporal_feature_input
 
+    visible_training_mask = None
+    if (
+        getattr(pc, "temporal_enabled", False)
+        and int(getattr(pc, "current_time_step", 0)) > 0
+        and hasattr(pc, "get_temporal_training_mask")
+    ):
+        candidate_mask = pc.get_temporal_training_mask(visible_mask)
+        if candidate_mask is not None and not bool(candidate_mask.all().item()):
+            visible_training_mask = candidate_mask
+
     cat_local_view = torch.cat([visible_feature_input, ob_view, ob_dist], dim=1) # [N, feature+3+1]
     cat_local_view_wodist = torch.cat([visible_feature_input, ob_view], dim=1) # [N, feature+3]
+    base_cat_local_view = torch.cat([feat, ob_view, ob_dist], dim=1)
+    base_cat_local_view_wodist = torch.cat([feat, ob_view], dim=1)
     if pc.appearance_dim > 0:
         camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * viewpoint_camera.uid
         # camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * 10
@@ -84,8 +97,18 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     # get offset's opacity
     if pc.add_opacity_dist:
         neural_opacity = pc.get_opacity_mlp(cat_local_view) # [N, k]
+        base_opacity_input = base_cat_local_view
     else:
         neural_opacity = pc.get_opacity_mlp(cat_local_view_wodist)
+        base_opacity_input = base_cat_local_view_wodist
+    if visible_training_mask is not None:
+        with torch.no_grad():
+            base_neural_opacity = pc.get_base_opacity_mlp(base_opacity_input)
+        neural_opacity = blend_observed_rows(
+            neural_opacity,
+            base_neural_opacity,
+            visible_training_mask,
+        )
 
     # opacity mask generation
     neural_opacity = neural_opacity.reshape([-1, 1])
@@ -98,21 +121,40 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     # get offset's color
     if pc.appearance_dim > 0:
         if pc.add_color_dist:
-            color = pc.get_color_mlp(torch.cat([cat_local_view, appearance], dim=1))
+            color_input = torch.cat([cat_local_view, appearance], dim=1)
+            base_color_input = torch.cat([base_cat_local_view, appearance], dim=1)
         else:
-            color = pc.get_color_mlp(torch.cat([cat_local_view_wodist, appearance], dim=1))
+            color_input = torch.cat([cat_local_view_wodist, appearance], dim=1)
+            base_color_input = torch.cat([base_cat_local_view_wodist, appearance], dim=1)
     else:
         if pc.add_color_dist:
-            color = pc.get_color_mlp(cat_local_view)
+            color_input = cat_local_view
+            base_color_input = base_cat_local_view
         else:
-            color = pc.get_color_mlp(cat_local_view_wodist)
+            color_input = cat_local_view_wodist
+            base_color_input = base_cat_local_view_wodist
+    color = pc.get_color_mlp(color_input)
+    if visible_training_mask is not None:
+        with torch.no_grad():
+            base_color = pc.get_base_color_mlp(base_color_input)
+        color = blend_observed_rows(color, base_color, visible_training_mask)
     color = color.reshape([anchor.shape[0]*pc.n_offsets, 3])# [mask]
 
     # get offset's cov
     if pc.add_cov_dist:
         scale_rot = pc.get_cov_mlp(cat_local_view)
+        base_cov_input = base_cat_local_view
     else:
         scale_rot = pc.get_cov_mlp(cat_local_view_wodist)
+        base_cov_input = base_cat_local_view_wodist
+    if visible_training_mask is not None:
+        with torch.no_grad():
+            base_scale_rot = pc.get_base_cov_mlp(base_cov_input)
+        scale_rot = blend_observed_rows(
+            scale_rot,
+            base_scale_rot,
+            visible_training_mask,
+        )
     scale_rot = scale_rot.reshape([anchor.shape[0]*pc.n_offsets, 7]) # [mask]
     
     # offsets

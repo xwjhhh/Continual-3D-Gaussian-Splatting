@@ -4,8 +4,9 @@ Evaluate a CL-Splats checkpoint on test split views.
 
 Supported evaluation paths in this simplified version:
   - normal 3DGS / pure-3dgs checkpoints
+  - public CL-Splats checkpoints via their native gsplat render chain
   - 3dgs_hash / idea3_hash checkpoints via scene_eval_bank + stage2_color_state
-  - Ours / Scaffold-GS checkpoints via Scaffold-GS anchor + MLP render chain
+  - IRC-GS / Scaffold-GS checkpoints via Scaffold-GS anchor + MLP render chain
   - 4DGS wrapper checkpoints via the original 4DGaussians render chain
 """
 
@@ -16,6 +17,7 @@ import importlib
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -44,7 +46,7 @@ import torch.nn.functional as F
 from loguru import logger
 
 from clsplats.dataset import CLSplatsDataset
-from clsplats.models.ours import _load_scaffold_mlp_payload
+from clsplats.models.irc_gs import _load_scaffold_mlp_payload
 from clsplats.representation.model_factory import (
     create_model as create_representation_model,
     get_available_models as get_available_representations,
@@ -799,7 +801,10 @@ def _create_scaffold_gaussians(model_cfg: Dict[str, Any]):
     runtime = _load_scaffold_runtime()
     gaussian_model_cls = runtime["GaussianModel"]
     temporal_enabled = int(model_cfg.get("num_times", 1)) > 1
-    if "appearance_dim" in model_cfg:
+    static_view_stream = bool(model_cfg.get("static_view_stream", False))
+    if static_view_stream:
+        appearance_dim = 0
+    elif "appearance_dim" in model_cfg:
         appearance_dim = int(model_cfg.get("appearance_dim", 32))
     else:
         appearance_dim = 0 if temporal_enabled else 32
@@ -817,7 +822,8 @@ def _create_scaffold_gaussians(model_cfg: Dict[str, Any]):
         add_cov_dist=bool(model_cfg.get("add_cov_dist", False)),
         add_color_dist=bool(model_cfg.get("add_color_dist", False)),
         temporal_latent_dim=int(model_cfg.get("temporal_latent_dim", DEFAULT_TEMPORAL_LATENT_DIM)),
-        temporal_num_times=int(model_cfg.get("num_times", 1)),
+        temporal_num_times=(1 if static_view_stream else int(model_cfg.get("num_times", 1))),
+        temporal_mode=str(model_cfg.get("temporal_mode", "per_anchor")),
     )
 
 
@@ -834,6 +840,19 @@ def _apply_checkpoint_temporal_layout_defaults(
     ckpt_train_cfg = ckpt_cfg.get("train", {}) if isinstance(ckpt_cfg, dict) else {}
     if "num_times" not in effective_model_cfg and isinstance(ckpt_train_cfg, dict):
         effective_model_cfg["num_times"] = int(ckpt_train_cfg.get("num_times", 1))
+
+    static_view_stream = bool(
+        checkpoint.get(
+            "static_view_stream",
+            ckpt_train_cfg.get("static_view_stream", False)
+            if isinstance(ckpt_train_cfg, dict)
+            else False,
+        )
+    )
+    effective_model_cfg["static_view_stream"] = static_view_stream
+    if static_view_stream:
+        effective_model_cfg["appearance_dim"] = 0
+        return effective_model_cfg
 
     mlp_state = checkpoint.get("mlp_state", None)
     latent_payload = checkpoint.get("base_temporal_latent", None)
@@ -940,7 +959,7 @@ def _build_sfgs_eval_model(
 ):
     if device != "cuda":
         raise RuntimeError(
-            "Ours / Scaffold-GS evaluation currently requires CUDA because the "
+        "IRC-GS / Scaffold-GS evaluation currently requires CUDA because the "
             "underlying Scaffold-GS modules construct CUDA tensors directly."
         )
 
@@ -949,7 +968,7 @@ def _build_sfgs_eval_model(
         model_cfg=model_cfg,
     )
     logger.info(
-        "[Eval] Ours effective temporal layout: "
+        "[Eval] IRC-GS effective temporal layout: "
         f"num_times={int(effective_model_cfg.get('num_times', 1))}, "
         f"temporal_latent_dim={int(effective_model_cfg.get('temporal_latent_dim', DEFAULT_TEMPORAL_LATENT_DIM))}, "
         f"appearance_dim={int(effective_model_cfg.get('appearance_dim', 32)) if 'appearance_dim' in effective_model_cfg else 'default'}"
@@ -984,25 +1003,37 @@ def _build_sfgs_eval_model(
     _load_scaffold_mlp_payload(gaussians, mlp_state)
 
     temporal_enabled = bool(checkpoint.get("temporal_enabled", int(effective_model_cfg.get("num_times", 1)) > 1))
+    temporal_adapter_enabled = bool(
+        checkpoint.get(
+            "temporal_adapter_enabled",
+            temporal_enabled and not bool(effective_model_cfg.get("static_view_stream", False)),
+        )
+    )
     temporal_payloads = checkpoint.get("temporal_adapter_payloads", {}) or {}
     if temporal_enabled:
-        temporal_args = _build_scaffold_temporal_training_args(checkpoint, effective_model_cfg)
         temporal_payload = _lookup_temporal_payload(temporal_payloads, int(timestep))
         lifetime_payload = _lookup_lifetime_metadata_payload(temporal_payloads, int(timestep))
         gaussians.current_time_step = int(timestep)
-        if int(timestep) <= 0:
+        if temporal_adapter_enabled:
+            temporal_args = _build_scaffold_temporal_training_args(checkpoint, effective_model_cfg)
+            if int(timestep) <= 0:
+                logger.info(
+                    "[Eval] Timestep 0 uses base Scaffold state only; skip temporal adapter restore."
+                )
+            elif temporal_payload is not None and hasattr(gaussians, "load_temporal_checkpoint_payload"):
+                gaussians.load_temporal_checkpoint_payload(temporal_payload, temporal_args, time_step=int(timestep))
+                logger.info(
+                    f"[Eval] Loaded embedded temporal adapter for timestep {int(timestep)} from checkpoint payload"
+                )
+            elif int(timestep) > 0:
+                logger.warning(
+                    f"[Eval] Missing embedded temporal adapter for timestep {int(timestep)}; "
+                    "rendering with base Scaffold temporal metadata only."
+                )
+        else:
             logger.info(
-                "[Eval] Timestep 0 uses base Scaffold state only; skip temporal adapter restore."
-            )
-        elif temporal_payload is not None and hasattr(gaussians, "load_temporal_checkpoint_payload"):
-            gaussians.load_temporal_checkpoint_payload(temporal_payload, temporal_args, time_step=int(timestep))
-            logger.info(
-                f"[Eval] Loaded embedded temporal adapter for timestep {int(timestep)} from checkpoint payload"
-            )
-        elif int(timestep) > 0:
-            logger.warning(
-                f"[Eval] Missing embedded temporal adapter for timestep {int(timestep)}; "
-                "rendering with base Scaffold temporal metadata only."
+                f"[Eval] Static view-stream timestep {int(timestep)} uses its isolated "
+                "property-MLP head without a temporal latent."
             )
         birth_timestep = None
         death_timestep = None
@@ -1062,7 +1093,7 @@ def _build_sfgs_eval_model(
             gaussians._eval_temporal_visible_anchors = int(render_mask.sum().item())
             gaussians._eval_temporal_total_anchors = int(render_mask.numel())
             logger.info(
-                f"[Eval] Ours temporal render mask for timestep {int(timestep)}: "
+                f"[Eval] IRC-GS temporal render mask for timestep {int(timestep)}: "
                 f"visible_anchors={int(render_mask.sum().item())}/{int(render_mask.numel())}"
             )
     # Scaffold-GS uses module.training as a renderer branch switch.  Keep the
@@ -1156,7 +1187,9 @@ def _find_latest_4dgs_iteration_dir(model_path: Path) -> Optional[Path]:
         return None
     candidates = [
         path for path in point_cloud_dir.iterdir()
-        if path.is_dir() and (path / "point_cloud.ply").is_file()
+        if path.is_dir()
+        and re.fullmatch(r"iteration_\d+", path.name)
+        and (path / "point_cloud.ply").is_file()
     ]
     if not candidates:
         return None
@@ -1212,6 +1245,82 @@ def _namespace_cache_items(namespace: argparse.Namespace) -> Tuple[Tuple[str, st
     return tuple(sorted((str(key), repr(value)) for key, value in vars(namespace).items()))
 
 
+def _valid_4dgs_normalization(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    center = value.get("center", None)
+    if center is None:
+        return False
+    try:
+        center_array = np.asarray(center, dtype=np.float64)
+        scale = float(value.get("scale", 1.0))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        center_array.shape == (3,)
+        and np.isfinite(center_array).all()
+        and math.isfinite(scale)
+        and scale > 0.0
+    )
+
+
+def _resolve_4dgs_normalization(
+    checkpoint_path: Path,
+    checkpoint: Dict[str, Any],
+    model_cfg: Dict[str, Any],
+    source_dir: Path,
+) -> Dict[str, Any]:
+    normalization = checkpoint.get("normalization", {})
+    if _valid_4dgs_normalization(normalization):
+        return dict(normalization)
+
+    fourdgs_cfg = model_cfg.get("fourdgs", {}) if isinstance(model_cfg, dict) else {}
+    if isinstance(fourdgs_cfg, dict) and not bool(fourdgs_cfg.get("normalize_scene", True)):
+        return dict(normalization) if isinstance(normalization, dict) else {}
+
+    sidecar_path = source_dir / "normalization.json"
+    if sidecar_path.is_file():
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except Exception:
+            sidecar = None
+        if _valid_4dgs_normalization(sidecar):
+            logger.warning(
+                "Recovered missing 4DGS normalization from dataset sidecar: "
+                f"{sidecar_path}"
+            )
+            return dict(sidecar)
+
+    def _checkpoint_timestep(path: Path) -> int:
+        match = re.fullmatch(r"checkpoint_t(\d+)\.pt", path.name)
+        return int(match.group(1)) if match else 10**9
+
+    sibling_checkpoints = sorted(
+        checkpoint_path.parent.glob("checkpoint_t*.pt"),
+        key=_checkpoint_timestep,
+    )
+    for candidate in sibling_checkpoints:
+        if candidate.resolve() == checkpoint_path.resolve():
+            continue
+        try:
+            payload = torch.load(candidate, map_location="cpu", weights_only=False)
+        except Exception:
+            continue
+        candidate_normalization = payload.get("normalization", {}) if isinstance(payload, dict) else {}
+        if _valid_4dgs_normalization(candidate_normalization):
+            logger.warning(
+                "Recovered missing 4DGS normalization from sibling checkpoint: "
+                f"{candidate}"
+            )
+            return dict(candidate_normalization)
+
+    logger.warning(
+        "4DGS checkpoint has no valid normalization metadata. Custom camera renders "
+        "may be misaligned if the training input was normalized."
+    )
+    return dict(normalization) if isinstance(normalization, dict) else {}
+
+
 def _build_4dgs_eval_model(
     checkpoint_path: Path,
     checkpoint: Dict[str, Any],
@@ -1231,7 +1340,20 @@ def _build_4dgs_eval_model(
     source_dir = checkpoint.get("source_dir", None)
     model_path = checkpoint.get("model_path", None)
     if source_dir is None:
-        source_dir = checkpoint_path.parent / "_4dgs_input" / checkpoint_path.parent.name
+        # Bridge checkpoints live inside the model directory, while native
+        # 4DGS rendering receives that model directory itself.  Normalize both
+        # forms to the generated-input layout used by the bridge.  Older runs
+        # may place _4dgs_input beside the model directory, so accept both.
+        model_root = checkpoint_path if checkpoint_path.is_dir() else checkpoint_path.parent
+        source_candidates = (
+            model_root / "_4dgs_input" / model_root.name,
+            model_root.parent / "_4dgs_input" / model_root.name,
+            model_root / "_4dgs_input",
+        )
+        source_dir = next(
+            (candidate for candidate in source_candidates if candidate.is_dir()),
+            source_candidates[0],
+        )
     if model_path is None:
         model_path = checkpoint_path.parent
     source_dir = Path(str(source_dir)).expanduser().resolve()
@@ -1240,6 +1362,18 @@ def _build_4dgs_eval_model(
         raise FileNotFoundError(f"4DGS eval source_dir does not exist: {source_dir}")
     if not model_path.is_dir():
         raise FileNotFoundError(f"4DGS eval model_path does not exist: {model_path}")
+
+    normalization = _resolve_4dgs_normalization(
+        checkpoint_path=checkpoint_path,
+        checkpoint=checkpoint,
+        model_cfg=model_cfg,
+        source_dir=source_dir,
+    )
+    if _valid_4dgs_normalization(normalization):
+        logger.info(
+            "4DGS custom-camera normalization: "
+            f"center={normalization['center']}, scale={float(normalization['scale']):.8f}"
+        )
 
     cfg_args = _load_4dgs_cfg_args(model_path)
     scene_args = SimpleNamespace(
@@ -1256,8 +1390,31 @@ def _build_4dgs_eval_model(
         extension=str(getattr(cfg_args, "extension", checkpoint.get("image_extension", ".png")) or ".png"),
         llffhold=int(getattr(cfg_args, "llffhold", 8) or 8),
     )
-    iteration_dir = _find_latest_4dgs_iteration_dir(model_path)
-    ply_path = iteration_dir / "point_cloud.ply" if iteration_dir is not None else None
+    latest_iteration_dir = _find_latest_4dgs_iteration_dir(model_path)
+    expected_iteration = int(getattr(cfg_args, "iterations", 0) or 0)
+    if expected_iteration > 0:
+        expected_iteration_dir = model_path / "point_cloud" / f"iteration_{expected_iteration}"
+        if not (expected_iteration_dir / "point_cloud.ply").is_file():
+            latest_name = (
+                latest_iteration_dir.name
+                if latest_iteration_dir is not None
+                else "none"
+            )
+            raise FileNotFoundError(
+                "4DGS training is incomplete for comparison rendering: expected "
+                f"{expected_iteration_dir}/point_cloud.ply from cfg_args, "
+                f"but the latest available fine model is {latest_name}."
+            )
+        iteration_dir = expected_iteration_dir
+    else:
+        iteration_dir = latest_iteration_dir
+    if iteration_dir is None:
+        raise FileNotFoundError(
+            "4DGS fine-stage model is not available under "
+            f"{model_path}/point_cloud (expected iteration_N/point_cloud.ply). "
+            "The run may still be in coarse training or may not have completed."
+        )
+    ply_path = iteration_dir / "point_cloud.ply"
 
     cache_key = (
         str(root),
@@ -1284,7 +1441,14 @@ def _build_4dgs_eval_model(
         hyper = hyper_group.extract(hyper_defaults)
 
         gaussians = runtime["GaussianModel"](scene_args.sh_degree, hyper)
-        scene = runtime["Scene"](scene_args, gaussians, load_iteration=-1, shuffle=False)
+        iteration_match = re.fullmatch(r"iteration_(\d+)", iteration_dir.name)
+        load_iteration = int(iteration_match.group(1)) if iteration_match else -1
+        scene = runtime["Scene"](
+            scene_args,
+            gaussians,
+            load_iteration=load_iteration,
+            shuffle=False,
+        )
         if hasattr(gaussians, "eval"):
             gaussians.eval()
 
@@ -1296,14 +1460,14 @@ def _build_4dgs_eval_model(
             "source_dir": source_dir,
             "model_path": model_path,
             "dataset_type": getattr(scene, "dataset_type", "blender"),
-            "normalization": checkpoint.get("normalization", {}),
+            "normalization": normalization,
             "white_background": bool(scene_args.white_background),
             "cache_key": cache_key,
         }
         _FOURDGS_EVAL_CONTEXT_CACHE.clear()
         _FOURDGS_EVAL_CONTEXT_CACHE[cache_key] = context
     else:
-        context["normalization"] = checkpoint.get("normalization", {})
+        context["normalization"] = normalization
         logger.info(
             "Reusing cached 4DGS eval scene: "
             f"model_path={model_path}, iteration={iteration_dir.name if iteration_dir else 'unknown'}"
@@ -1382,15 +1546,7 @@ def _apply_4dgs_camera_normalization(
     c2w = np.linalg.inv(w2c)
     c2w[:3, 3] = (c2w[:3, 3] - center_arr) * scale
     w2c = np.linalg.inv(c2w)
-
-    loader_w2c = np.eye(4, dtype=np.float64)
-    loader_w2c[:3, :3] = np.diag([1.0, -1.0, -1.0]) @ w2c[:3, :3]
-    loader_w2c[:3, 3] = -w2c[:3, 3]
-
-    loader_R = -loader_w2c[:3, :3].T
-    loader_R[:, 0] *= -1
-    loader_T = -loader_w2c[:3, 3]
-    return loader_R, loader_T
+    return w2c[:3, :3].T, w2c[:3, 3]
 
 
 def _to_4dgs_camera(camera, gt_image: torch.Tensor, context: Dict[str, Any]):
@@ -1458,6 +1614,134 @@ def _is_hash_model(model_name: str) -> bool:
     }
 
 
+def _is_official_cl_splats_checkpoint(checkpoint: Dict[str, Any]) -> bool:
+    return (
+        str(checkpoint.get("trainer_type", "")).strip().lower()
+        == "official_cl_splats"
+    )
+
+
+def _load_official_cl_splats_ply(
+    ply_path: Path,
+    device: torch.device,
+) -> Dict[str, Any]:
+    """Load a public CL-Splats PLY without changing its gsplat layout."""
+    vertices = PlyData.read(str(ply_path))["vertex"]
+    names = {str(prop.name) for prop in vertices.properties}
+    required = {
+        "x",
+        "y",
+        "z",
+        "scale_0",
+        "scale_1",
+        "scale_2",
+        "rot_0",
+        "rot_1",
+        "rot_2",
+        "rot_3",
+        "opacity",
+        "f_dc_0",
+        "f_dc_1",
+        "f_dc_2",
+    }
+    missing = sorted(required - names)
+    if missing:
+        raise ValueError(
+            f"Official CL-Splats PLY is missing required fields: {missing}; path={ply_path}"
+        )
+
+    means = np.stack([vertices[name] for name in ("x", "y", "z")], axis=-1).astype(np.float32)
+    log_scales = np.stack(
+        [vertices[name] for name in ("scale_0", "scale_1", "scale_2")], axis=-1
+    ).astype(np.float32)
+    quats = np.stack(
+        [vertices[name] for name in ("rot_0", "rot_1", "rot_2", "rot_3")], axis=-1
+    ).astype(np.float32)
+    opacity_logits = np.asarray(vertices["opacity"], dtype=np.float32)
+    sh0 = np.stack(
+        [vertices[name] for name in ("f_dc_0", "f_dc_1", "f_dc_2")], axis=-1
+    ).astype(np.float32)[:, None, :]
+
+    rest_names = sorted(
+        (name for name in names if name.startswith("f_rest_")),
+        key=lambda name: int(name.rsplit("_", 1)[-1]),
+    )
+    if len(rest_names) % 3 != 0:
+        raise ValueError(
+            f"Official CL-Splats PLY has invalid SH field count={len(rest_names)}; path={ply_path}"
+        )
+    if rest_names:
+        rest = np.stack([vertices[name] for name in rest_names], axis=-1).astype(np.float32)
+        shn = rest.reshape(means.shape[0], -1, 3)
+    else:
+        shn = np.zeros((means.shape[0], 0, 3), dtype=np.float32)
+
+    colors = np.concatenate((sh0, shn), axis=1)
+    num_sh_coeffs = int(colors.shape[1])
+    sh_degree = math.isqrt(num_sh_coeffs) - 1
+    if (sh_degree + 1) ** 2 != num_sh_coeffs:
+        raise ValueError(
+            f"Official CL-Splats PLY has non-square SH coefficient count={num_sh_coeffs}; path={ply_path}"
+        )
+
+    return {
+        "means": torch.from_numpy(means).to(device),
+        "scales": torch.exp(torch.from_numpy(log_scales).to(device)),
+        "quats": F.normalize(torch.from_numpy(quats).to(device), dim=-1),
+        "opacities": torch.sigmoid(torch.from_numpy(opacity_logits).to(device)),
+        "colors": torch.from_numpy(colors).to(device),
+        "sh_degree": int(sh_degree),
+    }
+
+
+def _render_official_cl_splats_view(
+    camera,
+    params: Dict[str, Any],
+    bg_color: torch.Tensor,
+) -> torch.Tensor:
+    """Render a public CL-Splats PLY with the same gsplat path used in training."""
+    try:
+        from gsplat.rendering import rasterization
+    except ImportError as exc:
+        raise ImportError(
+            "Official CL-Splats evaluation requires gsplat in the active environment."
+        ) from exc
+
+    means = params["means"]
+    device = means.device
+    dtype = means.dtype
+    width = int(camera.image_width)
+    height = int(camera.image_height)
+
+    viewmats = camera.world_view_transform.transpose(0, 1).to(
+        device=device, dtype=dtype
+    ).unsqueeze(0)
+    intrinsics = torch.zeros((1, 3, 3), device=device, dtype=dtype)
+    intrinsics[..., 0, 0] = 0.5 * width / math.tan(float(camera.FoVx) * 0.5)
+    intrinsics[..., 1, 1] = 0.5 * height / math.tan(float(camera.FoVy) * 0.5)
+    intrinsics[..., 0, 2] = (width - 1) * 0.5
+    intrinsics[..., 1, 2] = (height - 1) * 0.5
+    intrinsics[..., 2, 2] = 1.0
+
+    rendered, _alphas, _info = rasterization(
+        means=means,
+        quats=params["quats"],
+        scales=params["scales"],
+        opacities=params["opacities"],
+        colors=params["colors"],
+        viewmats=viewmats,
+        Ks=intrinsics,
+        width=width,
+        height=height,
+        sh_degree=int(params["sh_degree"]),
+        backgrounds=bg_color.to(device=device, dtype=dtype).view(1, 3),
+        packed=False,
+        distributed=False,
+        render_mode="RGB",
+    )
+    return rendered[0, ..., :3].permute(2, 0, 1).contiguous()
+
+
 def _ply_field_names(ply_path: Path) -> set[str]:
     try:
         ply = PlyData.read(str(ply_path))
@@ -1476,7 +1760,10 @@ def _is_sfgs_model(
     checkpoint: Dict[str, Any],
     checkpoint_path: Optional[Path] = None,
 ) -> bool:
-    if model_name in {"ours", "sfgs", "scaffold-gs", "scaffold_gs"}:
+    if model_name in {
+        "irc-gs",
+        "scaffold-gs",
+    }:
         return True
     if str(checkpoint.get("trainer_type", "")).strip().lower() in {"scaffold_gs_rebuild", "scaffold_gs"}:
         return True
@@ -1629,6 +1916,7 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     if is_4dgs_model and not model_name:
         model_name = "4dgs"
     is_sfgs_model = False if is_4dgs_model else _is_sfgs_model(model_name, checkpoint, checkpoint_path)
+    is_official_cl_splats = _is_official_cl_splats_checkpoint(checkpoint)
 
     if timestep < 0 or timestep >= dataset.get_num_timesteps():
         raise ValueError(
@@ -1660,7 +1948,14 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
     temporal_visible_gaussians = None
     temporal_total_gaussians = None
 
-    if is_sfgs_model:
+    if is_official_cl_splats:
+        ply_path = resolve_ply_path(checkpoint_path, checkpoint)
+        render_model = _load_official_cl_splats_ply(
+            ply_path=ply_path,
+            device=torch.device(device),
+        )
+        render_source = "official_gsplat_ply"
+    elif is_sfgs_model:
         render_model, ply_path, mlp_dir = _build_sfgs_eval_model(
             checkpoint_path=checkpoint_path,
             checkpoint=checkpoint,
@@ -1746,6 +2041,10 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
 
                 if render_with_background_only:
                     rendered = bg_color.view(3, 1, 1).expand_as(gt_image).clone()
+                elif is_official_cl_splats:
+                    rendered = _render_official_cl_splats_view(
+                        camera, render_model, bg_color
+                    )
                 elif is_sfgs_model:
                     rendered = _render_sfgs_view(camera, render_model, bg_color)
                 elif is_4dgs_model:
@@ -1856,6 +2155,8 @@ def evaluate(args: argparse.Namespace) -> Dict[str, Any]:
                 height = int(getattr(camera, "image_height", 1))
                 width = int(getattr(camera, "image_width", 1))
                 return bg_color.view(3, 1, 1).expand(3, height, width).clone()
+            if is_official_cl_splats:
+                return _render_official_cl_splats_view(camera, render_model, bg_color)
             if is_sfgs_model:
                 return _render_sfgs_view(camera, render_model, bg_color)
             if is_4dgs_model:

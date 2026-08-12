@@ -2,7 +2,7 @@
 # 
 # Usage / 使用方法:
 #   conda env create -f environment_windows.yml
-#   conda activate cl-splats-dev
+#   conda activate irc-gs
 #
 # After activation, compile CUDA extensions / 激活后编译 CUDA 扩展:
 #   cd submodules/diff-gaussian-rasterization && pip install -e . --no-build-isolation
@@ -13,7 +13,7 @@
 #   - NVIDIA GPU with CUDA 12.1+ support / 支持 CUDA 12.1+ 的 NVIDIA 显卡
 #   - Visual Studio 2019/2022 with C++ build tools / 带 C++ 构建工具的 VS
 
-name: cl-splats-dev
+name: irc-gs
 channels:
   - pytorch
   - conda-forge

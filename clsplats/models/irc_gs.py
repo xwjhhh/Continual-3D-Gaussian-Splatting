@@ -1421,7 +1421,7 @@ class EveryTimeRebuildTrainer(CLSplatsTrainer):
         if int(self.timestep) > 0:
             self._restore_lifetime_from_temporal_payload(int(self.timestep) - 1)
         self._temporal_clone_phase_active = False
-        logger.info(f"Ours temporal trainer source: {Path(__file__).resolve()}")
+        logger.info(f"IRC-GS trainer source: {Path(__file__).resolve()}")
         if hasattr(training_args, "lambda_active_offsets"):
             legacy_weight = float(getattr(training_args, "lambda_active_offsets", 0.0))
             if legacy_weight != 0.0:
@@ -3074,5 +3074,5 @@ class EveryTimeRebuildTrainer(CLSplatsTrainer):
         self.gaussians.save_ply(path)
 
 
-OursTrainer = EveryTimeRebuildTrainer
+IRCGSTrainer = EveryTimeRebuildTrainer
 Pure3DGSTrainer = EveryTimeRebuildTrainer

@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.torch_extensions/
 
 .env
 .venv/
@@ -26,5 +27,25 @@ logs/
 *.tar
 *.tar.gz
 *.7z
+*.docx
+*.pdf
 
 tiny-cuda-nn/
+
+# Local research notes and duplicate development checkouts.
+/COMPARISON_VIDEO.md
+/conditional_temporal_split_layer.md
+/rebuttal*.md
+/PG2026_*
+/cl-splats-reproduction-main/
+/tests/
+/Scaffold-GS-main/scene/prototype_state.py
+/clsplats/comparison_video.py
+/clsplats/models/ours_splats.py
+/clsplats/models/prototype_inheritance.py
+/clsplats/utils/prepare_blender_levels.py
+/clsplats/utils/prepare_nerf_synthetic_continual.py
+/render_comparison_videos.sh
+/run_blender_levels.sh
+/run_nerf_synthetic_clnerf_ours_3k.sh
+/run_vote_threshold_ablation.sh

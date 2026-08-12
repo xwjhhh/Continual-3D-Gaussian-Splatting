@@ -5,10 +5,11 @@ closer to runnable out of the box:
 
 - `submodules/diff-gaussian-rasterization/`
 - `submodules/simple-knn/`
+- `cl-splats-main/`
 - `Scaffold-GS-main/`
 - `4DGaussians-master/`
 
-The pure 3DGS baseline is implemented through `clsplats/models/pure_3dgs.py`
+The 3DGS baseline is implemented through `clsplats/models/pure_3dgs.py`
 plus the local 3DGS representation/rendering code and the bundled CUDA
 extensions above.
 

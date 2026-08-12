@@ -427,6 +427,10 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
+    # Real WAT frames are opaque RGB images.  The upstream parser defaults to
+    # a white background for synthetic Blender scenes, so expose an explicit
+    # opt-out for real datasets without changing the synthetic default.
+    parser.add_argument("--black_background", action="store_true", default=False)
     
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -443,6 +447,8 @@ if __name__ == "__main__":
                 if key in {"OptimizationParams", "ModelHiddenParams", "ModelParams", "PipelineParams"}
             }
         args = merge_hparams(args, config)
+    if args.black_background:
+        args.white_background = False
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)

@@ -236,6 +236,29 @@ class GaussianModel:
                 kind=kind,
             )
 
+    def _ensure_static_property_modules_for_time(self, time_step: int):
+        """Copy task-local property MLPs without adding latent input channels."""
+        time_step = int(time_step)
+        if time_step <= 0:
+            return
+        key = self._time_key(time_step)
+        prev_key = self._time_key(time_step - 1)
+        for kind in ("opacity", "cov", "color"):
+            module_dict = self._get_temporal_property_dict(kind)
+            if key in module_dict:
+                continue
+            prev_mlp = (
+                module_dict[prev_key]
+                if time_step > 1 and prev_key in module_dict
+                else self._get_base_property_mlp(kind)
+            )
+            module_dict[key] = self._clone_property_mlp_from_prev(
+                prev_mlp,
+                prev_temporal_dim=0,
+                new_temporal_dim=0,
+                kind=kind,
+            )
+
     def _zero_temporal_input_slice(self, linear_layer: nn.Linear):
         if self.temporal_input_dim <= 0:
             return
@@ -259,6 +282,7 @@ class GaussianModel:
                  add_color_dist : bool = False,
                  temporal_latent_dim: int = 6,
                  temporal_num_times: int = 1,
+                 temporal_mode: str = "per_anchor",
                   ):
 
         self.feat_dim = feat_dim
@@ -278,7 +302,12 @@ class GaussianModel:
         self.temporal_block_dim = max(int(temporal_latent_dim), 1)
         self.temporal_num_times = max(int(temporal_num_times), 1)
         self.temporal_latent_dim = int(self.temporal_block_dim * self.temporal_num_times)
-        self.temporal_enabled = self.temporal_num_times > 1
+        self.temporal_mode = str(temporal_mode).lower()
+        if self.temporal_mode not in {"none", "per_anchor"}:
+            raise ValueError(
+                f"Unknown temporal_mode '{temporal_mode}'. Expected none or per_anchor."
+            )
+        self.temporal_enabled = self.temporal_num_times > 1 and self.temporal_mode != "none"
         self.enable_temporal_lora = self.temporal_enabled
         self.enable_color_lora = False
         self.enable_opacity_lora = False
@@ -324,6 +353,7 @@ class GaussianModel:
         self.temporal_anomaly_count = None
         self.temporal_anomaly_candidate_mask = None
         self.temporal_split_suppression_mask = None
+        self.temporal_training_mask = None
         self.temporal_attribute_grad_mask = None
         self.temporal_split_event_count = 0
         self.temporal_death_event_count = 0
@@ -344,7 +374,11 @@ class GaussianModel:
                 nn.Softmax(dim=1)
             ).cuda()
 
-        self.temporal_input_dim = (self.feat_dim + self.temporal_block_dim) if self.temporal_enabled else 0
+        self.temporal_input_dim = (
+            self.feat_dim + self.temporal_block_dim
+            if self.temporal_enabled and self.temporal_mode == "per_anchor"
+            else 0
+        )
         self.opacity_dist_dim = 1 if self.add_opacity_dist else 0
         self.add_cov_dist = add_cov_dist
         self.cov_dist_dim = 1 if self.add_cov_dist else 0
@@ -455,10 +489,18 @@ class GaussianModel:
     @property
     def get_opacity_mlp(self):
         return self._get_current_property_mlp("opacity")
+
+    @property
+    def get_base_opacity_mlp(self):
+        return self.mlp_opacity
     
     @property
     def get_cov_mlp(self):
         return self._get_current_property_mlp("cov")
+
+    @property
+    def get_base_cov_mlp(self):
+        return self.mlp_cov
 
     @property
     def get_color_mlp(self):
@@ -687,7 +729,7 @@ class GaussianModel:
             return
 
     def setup_base_temporal_state(self, training_args):
-        if not self.temporal_enabled:
+        if not self.temporal_enabled or self.temporal_mode != "per_anchor":
             return
         num_anchors = int(self.get_anchor.shape[0])
         block_dim = int(self.temporal_block_dim)
@@ -719,11 +761,18 @@ class GaussianModel:
                     if end > start and int(end - start) == block_dim:
                         latent = old_latent.detach()[:, start:end].clone()
             if latent is None:
-                latent = 0.01 * torch.randn(
+                latent = torch.zeros(
                     (num_anchors, block_dim),
                     device=self.get_anchor.device,
                     dtype=self.get_anchor.dtype,
                 )
+                training_mask = self.get_temporal_training_mask()
+                if bool(training_mask.any().item()):
+                    latent[training_mask] = 0.01 * torch.randn(
+                        (int(training_mask.sum().item()), block_dim),
+                        device=self.get_anchor.device,
+                        dtype=self.get_anchor.dtype,
+                    )
             self.base_temporal_state = self._build_temporal_state_from_tensor(latent)
             self.temporal_compact_time_step = int(self.current_time_step)
         self.base_temporal_state.set_layout(
@@ -736,6 +785,10 @@ class GaussianModel:
             self.base_temporal_state.latent,
             float(training_args.latent_lr),
         )
+        training_mask = self.get_temporal_training_mask()
+        if int(training_mask.shape[0]) == int(self.base_temporal_state.latent.shape[0]):
+            with torch.no_grad():
+                self.base_temporal_state.latent[~training_mask].zero_()
 
     def _append_base_temporal_latent(self, num_new: int):
         if self.base_temporal_state is None or num_new <= 0:
@@ -960,6 +1013,100 @@ class GaussianModel:
         self.temporal_split_suppression_mask = torch.zeros((num_anchors,), dtype=torch.bool, device="cuda")
         self.temporal_attribute_grad_mask = None
 
+    def setup_static_view_adaptation(self, time_step: int = 1):
+        """Prepare task-isolated static-view updates without a temporal latent."""
+        self.current_time_step = int(time_step)
+        self.temporal_phase3_active = False
+        self.temporal_local_growth_active = False
+        self.temporal_phase3_start_iter = -1
+        self.temporal_base_anchor_count = int(self.get_anchor.shape[0])
+        self.N_base_anchors = int(self.temporal_base_anchor_count)
+
+        self.base_temporal_state = None
+        self.temporal_state = None
+        self._ensure_static_property_modules_for_time(int(self.current_time_step))
+        self.temporal_bank_mlp = None
+        self.temporal_opacity_mlp = self._get_current_property_mlp("opacity")
+        self.temporal_cov_mlp = self._get_current_property_mlp("cov")
+        self.temporal_color_mlp = self._get_current_property_mlp("color")
+
+        for module in [self.mlp_opacity, self.mlp_cov, self.mlp_color]:
+            self._set_module_requires_grad(module, False)
+        if self.use_feat_bank:
+            self._set_module_requires_grad(self.mlp_feature_bank, False)
+        for module_dict in (
+            self.temporal_opacity_mlps,
+            self.temporal_cov_mlps,
+            self.temporal_color_mlps,
+        ):
+            for module in module_dict.values():
+                self._set_module_requires_grad(module, False)
+        for kind in ("opacity", "cov", "color"):
+            self._set_module_requires_grad(self._get_current_property_mlp(kind), True)
+        for tensor in [self._anchor, self._offset, self._anchor_feat, self._opacity, self._scaling, self._rotation]:
+            if isinstance(tensor, nn.Parameter):
+                tensor.requires_grad_(False)
+        if self.embedding_appearance is not None:
+            self._set_module_requires_grad(self.embedding_appearance, False)
+
+        self.temporal_optimizer = torch.optim.Adam(
+            [
+                {
+                    "params": self.get_opacity_mlp.parameters(),
+                    "lr": 0.0,
+                    "name": "temporal_opacity_mlp",
+                },
+                {
+                    "params": self.get_cov_mlp.parameters(),
+                    "lr": 0.0,
+                    "name": "temporal_cov_mlp",
+                },
+                {
+                    "params": self.get_color_mlp.parameters(),
+                    "lr": 0.0,
+                    "name": "temporal_color_mlp",
+                },
+            ],
+            lr=0.0,
+            eps=1e-15,
+        )
+
+        num_anchors = int(self.get_anchor.shape[0])
+        prev_birth_timestep = self.temporal_anchor_birth_timestep
+        prev_death_timestep = self.temporal_anchor_death_timestep
+        if not isinstance(prev_birth_timestep, torch.Tensor):
+            prev_birth_timestep = None
+        if not isinstance(prev_death_timestep, torch.Tensor):
+            prev_death_timestep = None
+        self.temporal_anchor_birth_timestep = torch.zeros(
+            (num_anchors,), dtype=torch.long, device="cuda"
+        )
+        self.temporal_anchor_death_timestep = torch.full(
+            (num_anchors,), 2**31 - 1, dtype=torch.long, device="cuda"
+        )
+        if prev_birth_timestep is not None:
+            copy_rows = min(int(prev_birth_timestep.numel()), num_anchors)
+            self.temporal_anchor_birth_timestep[:copy_rows] = prev_birth_timestep[:copy_rows].to(
+                device="cuda", dtype=torch.long
+            )
+        if prev_death_timestep is not None:
+            copy_rows = min(int(prev_death_timestep.numel()), num_anchors)
+            self.temporal_anchor_death_timestep[:copy_rows] = prev_death_timestep[:copy_rows].to(
+                device="cuda", dtype=torch.long
+            )
+
+        self.temporal_opacity_accum = torch.zeros((num_anchors, 1), dtype=torch.float32, device="cuda")
+        self.temporal_opacity_count = torch.zeros((num_anchors, 1), dtype=torch.int32, device="cuda")
+        self.temporal_last_opacity_max = torch.zeros((num_anchors, 1), dtype=torch.float32, device="cuda")
+        self.temporal_local_mask = torch.zeros((num_anchors,), dtype=torch.bool, device="cuda")
+        self.temporal_local_parent_ids = torch.full((num_anchors,), -1, dtype=torch.long, device="cuda")
+        self.temporal_anomaly_score = torch.zeros((num_anchors,), dtype=torch.float32, device="cuda")
+        self.temporal_anomaly_count = torch.zeros((num_anchors,), dtype=torch.int32, device="cuda")
+        self.temporal_anomaly_candidate_mask = torch.zeros((num_anchors,), dtype=torch.bool, device="cuda")
+        self.temporal_split_suppression_mask = torch.zeros((num_anchors,), dtype=torch.bool, device="cuda")
+        self.temporal_training_mask = None
+        self.temporal_attribute_grad_mask = None
+
     def update_temporal_learning_rate(self, iteration, training_args):
         if self.temporal_optimizer is None:
             return
@@ -1038,7 +1185,6 @@ class GaussianModel:
         device = self.get_anchor.device
         latent_reg = torch.tensor(0.0, device=device)
         mlp_reg = torch.tensor(0.0, device=device)
-
         active_state = self.temporal_state if self.temporal_state is not None else self.base_temporal_state
         if active_state is not None:
             active_state.set_layout(
@@ -1247,6 +1393,14 @@ class GaussianModel:
                 (self.temporal_split_suppression_mask, torch.zeros((int(num_new),), dtype=torch.bool, device=device)),
                 dim=0,
             )
+        if self.temporal_training_mask is not None:
+            self.temporal_training_mask = torch.cat(
+                (
+                    self.temporal_training_mask,
+                    torch.ones((int(num_new),), dtype=torch.bool, device=device),
+                ),
+                dim=0,
+            )
 
     def _prune_temporal_metadata(self, valid_mask: torch.Tensor):
         valid_mask = valid_mask.to(device=self.get_anchor.device, dtype=torch.bool).reshape(-1)
@@ -1278,6 +1432,8 @@ class GaussianModel:
             self.temporal_anomaly_candidate_mask = self.temporal_anomaly_candidate_mask[valid_mask]
         if self.temporal_split_suppression_mask is not None and int(self.temporal_split_suppression_mask.shape[0]) == int(valid_mask.shape[0]):
             self.temporal_split_suppression_mask = self.temporal_split_suppression_mask[valid_mask]
+        if self.temporal_training_mask is not None and int(self.temporal_training_mask.shape[0]) == int(valid_mask.shape[0]):
+            self.temporal_training_mask = self.temporal_training_mask[valid_mask]
         self._prune_temporal_state_rows(valid_mask)
 
     def get_temporal_local_mask(self):
@@ -1285,6 +1441,51 @@ class GaussianModel:
         if self.temporal_local_mask is None or int(self.temporal_local_mask.shape[0]) != n:
             return torch.zeros((n,), dtype=torch.bool, device=self.get_anchor.device)
         return self.temporal_local_mask
+
+    def set_temporal_training_mask(self, anchor_mask=None):
+        if anchor_mask is None:
+            self.temporal_training_mask = None
+            return
+        n = int(self.get_anchor.shape[0])
+        anchor_mask = anchor_mask.to(
+            device=self.get_anchor.device,
+            dtype=torch.bool,
+        ).reshape(-1)
+        if int(anchor_mask.shape[0]) != n:
+            raise ValueError(
+                "Temporal training mask must match anchor rows: "
+                f"{int(anchor_mask.shape[0])} != {n}"
+            )
+        self.temporal_training_mask = anchor_mask
+
+    def get_temporal_training_mask(self, visible_mask=None):
+        n = int(self.get_anchor.shape[0])
+        if (
+            self.temporal_training_mask is None
+            or int(self.temporal_training_mask.shape[0]) != n
+        ):
+            training_mask = torch.ones(
+                (n,),
+                dtype=torch.bool,
+                device=self.get_anchor.device,
+            )
+        else:
+            training_mask = self.temporal_training_mask.to(
+                device=self.get_anchor.device,
+                dtype=torch.bool,
+            )
+        if visible_mask is None:
+            return training_mask
+        visible_mask = visible_mask.to(
+            device=self.get_anchor.device,
+            dtype=torch.bool,
+        ).reshape(-1)
+        if int(visible_mask.shape[0]) != n:
+            raise ValueError(
+                "Visible mask must match anchor rows: "
+                f"{int(visible_mask.shape[0])} != {n}"
+            )
+        return training_mask[visible_mask]
 
     def get_temporal_render_mask(self, time_step: int | None = None):
         n = int(self.get_anchor.shape[0])
@@ -1450,7 +1651,7 @@ class GaussianModel:
         self.temporal_split_suppression_mask[selected_neighbor_ids] = True
         return int(selected_neighbor_ids.numel())
 
-    def enter_temporal_clone_phase(self, start_iteration: int):
+    def enter_temporal_clone_phase(self, start_iteration: int, train_property_mlps: bool = True):
         self.temporal_phase3_active = True
         self.temporal_local_growth_active = False
         self.temporal_phase3_start_iter = int(start_iteration)
@@ -1463,9 +1664,10 @@ class GaussianModel:
         if self.temporal_state is not None:
             for param in self.temporal_state.parameters():
                 param.requires_grad_(True)
-        self._set_module_requires_grad(self._get_current_history_mlp(), True)
-        for kind in ("opacity", "cov", "color"):
-            self._set_module_requires_grad(self._get_current_property_mlp(kind), True)
+        if train_property_mlps:
+            self._set_module_requires_grad(self._get_current_history_mlp(), True)
+            for kind in ("opacity", "cov", "color"):
+                self._set_module_requires_grad(self._get_current_property_mlp(kind), True)
 
     def set_scaffold_geometry_requires_grad(self, enabled: bool):
         for tensor in [self._anchor, self._offset, self._anchor_feat, self._opacity, self._scaling, self._rotation]:
@@ -1684,9 +1886,10 @@ class GaussianModel:
         if active_state is not None:
             start, end = self._state_current_block_slice(active_state, int(time_step))
             if end > start:
+                training_mask = self.get_temporal_training_mask()
                 payload["latent_block"] = self._pack_sparse_latent_rows(
                     active_state.latent[:, start:end],
-                    None,
+                    training_mask,
                 )
                 payload["latent_block_dim"] = int(end - start)
         if self.temporal_last_opacity_max is not None:
@@ -1725,6 +1928,7 @@ class GaussianModel:
             payload["split_suppression_mask"] = self.temporal_split_suppression_mask.detach().cpu()
         else:
             payload["split_suppression_mask"] = torch.zeros((num_anchors,), dtype=torch.bool).cpu()
+        payload["training_mask"] = self.get_temporal_training_mask().detach().cpu()
         payload["phase3_active"] = bool(self.temporal_phase3_active)
         payload["phase3_start_iter"] = int(self.temporal_phase3_start_iter)
         payload["base_anchor_count"] = int(self.temporal_base_anchor_count)
@@ -1837,6 +2041,15 @@ class GaussianModel:
                 and int(split_suppression_mask.shape[0]) == int(self.temporal_split_suppression_mask.shape[0])
             ):
                 self.temporal_split_suppression_mask = split_suppression_mask
+        training_mask = payload.get("training_mask", None)
+        if training_mask is not None:
+            training_mask = training_mask.to(device="cuda", dtype=torch.bool).reshape(-1)
+            if int(training_mask.shape[0]) == int(self.get_anchor.shape[0]):
+                self.temporal_training_mask = training_mask
+                active_state = self.temporal_state if self.temporal_state is not None else self.base_temporal_state
+                if active_state is not None and int(active_state.latent.shape[0]) == int(training_mask.shape[0]):
+                    with torch.no_grad():
+                        active_state.latent[~training_mask].zero_()
         self.temporal_phase3_active = bool(payload.get("phase3_active", False))
         self.temporal_phase3_start_iter = int(payload.get("phase3_start_iter", -1))
         self.temporal_base_anchor_count = int(payload.get("base_anchor_count", self.get_anchor.shape[0]))
@@ -2503,7 +2716,10 @@ class GaussianModel:
                 time_step = int(key)
                 if time_step <= 0:
                     continue
-                self._ensure_temporal_modules_for_time(time_step)
+                if self.temporal_enabled:
+                    self._ensure_temporal_modules_for_time(time_step)
+                elif kind != "history":
+                    self._ensure_static_property_modules_for_time(time_step)
                 module = None
                 if kind == "history":
                     module = self.temporal_history_mlps[key] if key in self.temporal_history_mlps else None

@@ -1,28 +1,29 @@
 """
 Training method factory for the open-source release.
 
-Only stable public methods are registered here:
+Only public release methods are registered here:
+  - irc-gs
   - cl-splats
-  - pure-3dgs
-  - ours
+  - scaffold-gs
+  - 3dgs
   - 4dgs
 """
 
 from __future__ import annotations
 
 import importlib
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 import omegaconf
 from loguru import logger
 
-from clsplats.models.cl_splats import CLSplatsTrainer
+from clsplats.models.official_cl_splats import OfficialCLSplatsTrainer
 from clsplats.representation.model_factory import (
     get_available_models as get_available_representations,
 )
 
 
-TrainerBuilder = Callable[[omegaconf.DictConfig], CLSplatsTrainer]
+TrainerBuilder = Callable[[omegaconf.DictConfig], Any]
 
 _TRAINER_BUILDERS: Dict[str, TrainerBuilder] = {}
 
@@ -50,50 +51,52 @@ def get_available_models() -> List[str]:
 
 
 @register_model("cl-splats")
-@register_model("clsplats")
-def build_cl_splats(cfg: omegaconf.DictConfig) -> CLSplatsTrainer:
-    return CLSplatsTrainer(cfg)
+def build_cl_splats(cfg: omegaconf.DictConfig) -> OfficialCLSplatsTrainer:
+    """Use the public sibling implementation for the canonical method name."""
+    return OfficialCLSplatsTrainer(cfg)
 
-
-@register_model("pure-3dgs")
-@register_model("pure_3dgs")
 @register_model("3dgs")
-def build_pure_3dgs(cfg: omegaconf.DictConfig) -> CLSplatsTrainer:
+def build_pure_3dgs(cfg: omegaconf.DictConfig) -> Any:
     from clsplats.models.pure_3dgs import Pure3DGSTrainer
 
     return Pure3DGSTrainer(cfg)
 
 
-@register_model("ours")
-@register_model("scaffold-gs")
-@register_model("scaffold_gs")
-@register_model("sfgs")
-def build_ours(cfg: omegaconf.DictConfig) -> CLSplatsTrainer:
-    from clsplats.models.ours import EveryTimeRebuildTrainer
+@register_model("irc-gs")
+def build_irc_gs(cfg: omegaconf.DictConfig) -> Any:
+    from clsplats.models.irc_gs import EveryTimeRebuildTrainer
 
+    with omegaconf.open_dict(cfg):
+        cfg.model.rebuild_every_timestep = False
+    return EveryTimeRebuildTrainer(cfg)
+
+
+@register_model("scaffold-gs")
+def build_scaffold_gs(cfg: omegaconf.DictConfig) -> Any:
+    from clsplats.models.irc_gs import EveryTimeRebuildTrainer
+
+    with omegaconf.open_dict(cfg):
+        cfg.model.rebuild_every_timestep = True
     return EveryTimeRebuildTrainer(cfg)
 
 
 @register_model("4dgs")
-@register_model("4DGS")
-@register_model("four-d-gs")
-@register_model("four_d_gs")
-def build_4dgs(cfg: omegaconf.DictConfig) -> CLSplatsTrainer:
+def build_4dgs(cfg: omegaconf.DictConfig) -> Any:
     module = importlib.import_module("clsplats.models.4dgs")
     return module.FourDGSTrainer(cfg)
 
 
-def create_trainer(cfg: omegaconf.DictConfig) -> CLSplatsTrainer:
+def create_trainer(cfg: omegaconf.DictConfig) -> Any:
     model_cfg = cfg.get("model", {})
-    model_name = _cfg_get(model_cfg, "name", "cl-splats")
+    model_name = _cfg_get(model_cfg, "name", "irc-gs")
     builder = _TRAINER_BUILDERS.get(model_name)
     if builder is None and model_name in get_available_representations():
         logger.warning(
             "Deprecated config detected: "
             f"`model.name={model_name}` is a representation key. "
-            f"Use `model.name=cl-splats` and `model.representation={model_name}`."
+            f"Use `model.name=irc-gs` and `model.representation={model_name}`."
         )
-        builder = _TRAINER_BUILDERS.get("cl-splats")
+        builder = _TRAINER_BUILDERS.get("irc-gs")
 
     if builder is None:
         available = ", ".join(get_available_models())

@@ -93,8 +93,13 @@ class SpherePruner(BasePruner):
         Args:
             gaussians: Tensor of shape (N, 3) containing Gaussian centers
         """
-        if gaussians.shape[0] == 0:
-            self.spheres = []
+        self.spheres = []
+        num_samples = int(gaussians.shape[0])
+        if num_samples < 2:
+            # sklearn HDBSCAN requires at least two samples. A sphere fitted to
+            # one point would also have radius zero and immediately over-prune
+            # that point as soon as optimization moves it, so disable sphere
+            # pruning until there is enough spatial support.
             return
         
         # Convert to numpy for sklearn
@@ -111,7 +116,6 @@ class SpherePruner(BasePruner):
         cluster_labels = clusterer.fit_predict(points_np)
         
         # Fit a sphere for each cluster
-        self.spheres = []
         unique_labels = np.unique(cluster_labels)
         
         for label in unique_labels:

@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use IRC-GS, please cite this software and the associated paper."
+title: "IRC-GS: Inheritance, Revision, and Consolidation for Continual 3D Gaussian Splatting"
+type: software
+authors:
+  - family-names: Xu
+    given-names: Wenjin
+  - family-names: Li
+    given-names: Jiongyang
+  - family-names: Wang
+    given-names: Qiang
+  - family-names: Shuang
+    given-names: Wei
+  - family-names: Wang
+    given-names: Shaoqian
+  - family-names: Zhao
+    given-names: Zijian
+  - family-names: Du
+    given-names: Jianning
+repository-code: "https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting"
+version: 0.1.0
+date-released: 2026-08-12

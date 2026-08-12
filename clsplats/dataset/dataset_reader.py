@@ -419,7 +419,7 @@ class CLSplatsDataset:
             if self.dataset_type == "colmap":
                 scene_info = self._read_colmap_scene(path, timestep=timestep)
             else:
-                scene_info = self._read_nerf_synthetic_scene(path)
+                scene_info = self._read_nerf_synthetic_scene(path, timestep=timestep)
             
             self._scene_info_cache[timestep] = scene_info
         
@@ -820,7 +820,7 @@ class CLSplatsDataset:
         
         return cam_infos
     
-    def _read_nerf_synthetic_scene(self, path: str) -> SceneInfo:
+    def _read_nerf_synthetic_scene(self, path: str, timestep: int = 0) -> SceneInfo:
         """Read NeRF Synthetic format scene."""
         # Read train cameras
         train_cam_infos = self._read_nerf_cameras(
@@ -837,7 +837,22 @@ class CLSplatsDataset:
         nerf_normalization = self._get_nerf_normalization(train_cam_infos)
         
         # Generate or load point cloud
-        ply_path = os.path.join(path, "points3d.ply")
+        split_metadata_path = os.path.join(self.path, "continual_split.json")
+        use_shared_static_ply = False
+        if self._timestep_layout == "root_dirs" and os.path.isfile(split_metadata_path):
+            try:
+                with open(split_metadata_path, "r", encoding="utf-8") as handle:
+                    split_metadata = json.load(handle)
+                use_shared_static_ply = str(split_metadata.get("protocol", "")).startswith(
+                    "CLNeRF"
+                )
+            except Exception:
+                use_shared_static_ply = False
+        ply_path = (
+            os.path.join(self.path, "t0", "points3d.ply")
+            if use_shared_static_ply
+            else os.path.join(path, "points3d.ply")
+        )
         if not os.path.exists(ply_path):
             num_pts = 100_000
             print(f"Generating random point cloud ({num_pts})...")

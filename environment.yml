@@ -1,4 +1,4 @@
-name: cl-splats-dev
+name: irc-gs
 channels:
   - conda-forge
 dependencies:
@@ -70,4 +70,3 @@ dependencies:
       - typeguard==2.13.3
       - typing-extensions==4.14.1
       - tyro==0.9.26
-prefix: /home/jan/miniforge3/envs/cl-splats-dev

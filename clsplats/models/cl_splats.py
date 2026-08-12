@@ -11,6 +11,7 @@ import os
 import random
 import re
 from contextlib import suppress
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -37,6 +38,7 @@ from clsplats.utils.majority_vote_lifter import MajorityVoteLifter
 from clsplats.sampling.gaussian_sampler import GaussianSampler
 from clsplats.pruning.sphere_pruner import SpherePruner
 from clsplats.utils.loss_utils import combined_loss, l1_loss
+from clsplats.history import HistoryRecorder, gaussian_params_from_model
 
 # Try to import renderer
 try:
@@ -163,6 +165,17 @@ class CLSplatsTrainer:
             "num_gaussians": [],
             "num_pruned": [],
         }
+        history_cfg = cfg.get("history", {}) or {}
+        self.supports_exact_history = self.method_name in {"cl-splats", "clsplats"}
+        self.scene_history_enabled = bool(
+            history_cfg.get("log_history", False) and self.supports_exact_history
+        )
+        configured_history_dir = history_cfg.get("dir", None)
+        self.scene_history_dir = str(
+            configured_history_dir
+            or os.path.join(cfg.get("output_dir", "outputs"), "history")
+        )
+        self.scene_history = HistoryRecorder()
         
         # Log file path for file-only logging
         runtime_cfg = cfg.get("runtime", {})
@@ -270,6 +283,7 @@ class CLSplatsTrainer:
         num_times = train_cfg.get("num_times", 10)
         
         self.timestep = timestep
+        self._timestep_start_gaussian_count = int(self.gaussians.get_xyz.shape[0])
         logger.info(f"Preparing timestep {timestep}")
         
         # Reset sphere fitting state for new timestep
@@ -277,6 +291,70 @@ class CLSplatsTrainer:
         
         if dataset is not None:
             self._load_timestep_data(dataset, timestep)
+
+        self._begin_scene_history()
+
+    def _empty_active_mask(self) -> torch.Tensor:
+        return torch.zeros(
+            int(self.gaussians.get_xyz.shape[0]),
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+    def _require_active_mask(self, context: str) -> torch.Tensor:
+        """Return a shape-aligned mask or fail before locality is lost."""
+        if self.active_gaussians_mask is None:
+            raise RuntimeError(
+                f"{context}: active Gaussian lineage is missing at t={self.timestep}. "
+                "Continuing would update frozen history and make exact recovery invalid."
+            )
+        mask = self.active_gaussians_mask.bool().reshape(-1)
+        expected = int(self.gaussians.get_xyz.shape[0])
+        if int(mask.shape[0]) != expected:
+            raise RuntimeError(
+                f"{context}: active Gaussian lineage has {mask.shape[0]} rows, "
+                f"expected {expected} at t={self.timestep}."
+            )
+        self.active_gaussians_mask = mask
+        return mask
+
+    def _begin_scene_history(self) -> None:
+        """Save the pre-update active rows O_t and their positions I_t."""
+        if not self.scene_history_enabled or self.timestep <= 0:
+            return
+
+        active_start = self._require_active_mask("History begin")
+        self.scene_history.begin_timestep(
+            timestep=int(self.timestep),
+            active_mask=active_start,
+            params=gaussian_params_from_model(self.gaussians),
+        )
+        logger.info(
+            f"[HistoryBegin] t={self.timestep} saved_active="
+            f"{int(active_start.sum().item())} start_gaussians={active_start.numel()}"
+        )
+
+    def _finalize_scene_history(self) -> None:
+        """Persist the end-of-update active lineage needed for exact rollback."""
+        if not self.scene_history_enabled or self.timestep <= 0:
+            return
+
+        record = self.scene_history.open_record
+        if record is None or int(record.timestep) != int(self.timestep):
+            raise RuntimeError(
+                f"Cannot finalize history for t={self.timestep}: no matching open record."
+            )
+
+        active_end = self._require_active_mask("History end")
+        finalized = self.scene_history.end_timestep(active_end)
+        history_path = self.scene_history.save_record(
+            self.scene_history_dir, finalized
+        )
+        logger.info(
+            f"[HistoryEnd] t={self.timestep} active_lineage="
+            f"{int(active_end.sum().item())}/{active_end.numel()} "
+            f"record={history_path} bytes={history_path.stat().st_size}"
+        )
 
     def _load_timestep_data(self, dataset, timestep: int) -> None:
         """Load data for the current timestep."""
@@ -328,7 +406,7 @@ class CLSplatsTrainer:
                 self._compute_active_gaussians_mask()
             else:
                 self.change_masks = None
-                self.active_gaussians_mask = None
+                self.active_gaussians_mask = self._empty_active_mask()
         else:
             self.change_masks = None
             self.current_depths = None
@@ -365,11 +443,11 @@ class CLSplatsTrainer:
         based on majority voting across multiple views.
         """
         if self.change_masks is None or len(self.change_masks) == 0:
-            self.active_gaussians_mask = None
+            self.active_gaussians_mask = self._empty_active_mask()
             return
         
         if self.gaussians.get_xyz.shape[0] == 0:
-            self.active_gaussians_mask = None
+            self.active_gaussians_mask = self._empty_active_mask()
             return
         
         # Get 3D positions of all Gaussians
@@ -482,13 +560,9 @@ class CLSplatsTrainer:
                     # Only active Gaussians can be pruned by opacity
                     active_mask_for_prune = None
                     if self.timestep > 0:
-                        # Recompute mask if it was invalidated by previous densification
-                        if self.active_gaussians_mask is None and self.change_masks is not None:
-                            self._compute_active_gaussians_mask()
-                        
-                        if self.active_gaussians_mask is not None and \
-                           self.active_gaussians_mask.shape[0] == self.gaussians.get_xyz.shape[0]:
-                            active_mask_for_prune = self.active_gaussians_mask
+                        active_mask_for_prune = self._require_active_mask(
+                            "Before densify_and_prune"
+                        )
                     
                     num_gaussians_before = self.gaussians.get_xyz.shape[0]
                     # CL-Splats: Capture updated mask from densify_and_prune
@@ -505,9 +579,14 @@ class CLSplatsTrainer:
                     # Use the updated mask instead of recomputing from scratch
                     if updated_mask is not None:
                         self.active_gaussians_mask = updated_mask
-                    elif self.gaussians.get_xyz.shape[0] != num_gaussians_before:
-                        # Fallback: invalidate mask if count changed but no mask returned
-                        self.active_gaussians_mask = None
+                    elif (
+                        self.timestep > 0
+                        and self.gaussians.get_xyz.shape[0] != num_gaussians_before
+                    ):
+                        raise RuntimeError(
+                            "densify_and_prune changed the Gaussian count without "
+                            "returning an updated active lineage mask."
+                        )
                 
                 # Opacity reset intentionally removed to avoid scheduled quality drops
                 # around opacity_reset_interval (e.g. iter 3000 on t0).
@@ -521,11 +600,8 @@ class CLSplatsTrainer:
                    self.active_gaussians_mask.shape[0] == self.gaussians.get_xyz.shape[0]:
                     self._apply_sphere_pruning()
             
-            # Check if Gaussian count changed - invalidate mask if so
-            num_gaussians_after = self.gaussians.get_xyz.shape[0]
-            if num_gaussians_before != num_gaussians_after and self.active_gaussians_mask is not None:
-                # Mask is now invalid, set to None until recomputed
-                self.active_gaussians_mask = None
+            if self.timestep > 0:
+                self._require_active_mask("After densification/pruning")
             
             # CL-Splats: Freeze optimizer momentum for inactive Gaussians
             # This prevents any accumulated momentum from affecting frozen Gaussians
@@ -598,10 +674,14 @@ class CLSplatsTrainer:
             msg = f"Sphere pruning: removing {num_to_prune} Gaussians that escaped bounding spheres"
             self._emit_progress_message(msg)
             
-            self.gaussians.prune_points(prune_mask)
-            
-            # Invalidate active mask after pruning (will be recomputed later)
-            self.active_gaussians_mask = None
+            updated_mask = self.gaussians.prune_points(
+                prune_mask, self.active_gaussians_mask
+            )
+            if updated_mask is None:
+                raise RuntimeError(
+                    "Sphere pruning did not return an updated active lineage mask."
+                )
+            self.active_gaussians_mask = updated_mask
 
     def train(self) -> Dict[str, Any]:
         """Execute training for the current timestep."""
@@ -610,6 +690,9 @@ class CLSplatsTrainer:
         if self.gaussians.get_xyz.shape[0] == 0:
             logger.error("No Gaussians initialized! Call initialize_from_point_cloud first.")
             return {"avg_loss": 0.0, "timestep": self.timestep}
+
+        if self.timestep > 0:
+            self._require_active_mask("Training start")
         
         # Setup training if not done
         # Training loop config
@@ -756,17 +839,29 @@ class CLSplatsTrainer:
         
         stats = {
             "timestep": self.timestep,
+            "start_num_gaussians": int(
+                getattr(
+                    self,
+                    "_timestep_start_gaussian_count",
+                    self.gaussians.get_xyz.shape[0],
+                )
+            ),
             "final_loss": epoch_losses[-1] if epoch_losses else 0.0,
             "avg_loss": sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0,
             "num_gaussians": self.gaussians.get_xyz.shape[0],
             "local_optimization_enabled": self.active_gaussians_mask is not None,
         }
+        stats["gaussian_delta"] = (
+            int(stats["num_gaussians"]) - int(stats["start_num_gaussians"])
+        )
         
         if self.active_gaussians_mask is not None:
             stats["num_active_gaussians"] = self.active_gaussians_mask.sum().item()
         
         self.history["losses"].append(stats["avg_loss"])
         self.history["num_gaussians"].append(stats["num_gaussians"])
+
+        self._finalize_scene_history()
         
         # GIF generation is opt-in; keep visualization PNG frames by default.
         train_cfg = self.cfg.get("train", {})
@@ -1068,20 +1163,42 @@ class CLSplatsTrainer:
         logger.info("Skipping training GIF generation; keeping visualization PNG frames.")
         return
 
-    def save_checkpoint(self, path: str) -> None:
-        """Save trainer state to checkpoint."""
+    def save_checkpoint(
+        self,
+        path: str,
+        ply_path_override: Optional[str] = None,
+        save_external_ply: bool = True,
+        compact_for_eval: bool = False,
+    ) -> None:
+        """Save trainer state using the checkpoint contract expected by train.py."""
+        del compact_for_eval
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
         
         checkpoint = {
             "timestep": self.timestep,
             "history": self.history,
             "config": omegaconf.OmegaConf.to_container(self.cfg),
+            "scene_history_enabled": self.scene_history_enabled,
+            "scene_history_dir": os.path.abspath(self.scene_history_dir),
+            "scene_history_timesteps": [
+                int(record.timestep) for record in self.scene_history.records
+            ],
         }
         
-        # Save Gaussians separately as PLY
-        ply_path = path.replace(".pt", ".ply")
-        self.gaussians.save_ply(ply_path)
-        checkpoint["ply_path"] = ply_path
+        # The Gaussian tensors are stored in the PLY rather than embedded in the
+        # .pt payload, so a usable external PLY is always required.
+        ply_path = (
+            str(ply_path_override)
+            if ply_path_override is not None
+            else path.replace(".pt", ".ply")
+        )
+        os.makedirs(
+            os.path.dirname(ply_path) if os.path.dirname(ply_path) else ".",
+            exist_ok=True,
+        )
+        if ply_path_override is None or save_external_ply or not os.path.exists(ply_path):
+            self.gaussians.save_ply(ply_path)
+        checkpoint["ply_path"] = os.path.abspath(ply_path)
         
         torch.save(checkpoint, path)
         logger.info(f"Saved checkpoint to {path}")
@@ -1094,8 +1211,64 @@ class CLSplatsTrainer:
         self.history = checkpoint["history"]
         
         # Load Gaussians from PLY
-        if "ply_path" in checkpoint and os.path.exists(checkpoint["ply_path"]):
-            self.gaussians.load_ply(checkpoint["ply_path"])
+        raw_ply_path = checkpoint.get("ply_path", path.replace(".pt", ".ply"))
+        checkpoint_dir = os.path.dirname(os.path.abspath(path))
+        ply_candidates = [str(raw_ply_path)]
+        ply_candidates.append(
+            os.path.join(checkpoint_dir, os.path.basename(str(raw_ply_path)))
+        )
+        ply_candidates.append(path.replace(".pt", ".ply"))
+        if not os.path.isabs(str(raw_ply_path)):
+            ply_candidates.append(os.path.join(checkpoint_dir, str(raw_ply_path)))
+        ply_path = next(
+            (candidate for candidate in ply_candidates if os.path.exists(candidate)),
+            None,
+        )
+        if ply_path is None:
+            raise FileNotFoundError(
+                f"Checkpoint Gaussian PLY not found. Tried: {ply_candidates}"
+            )
+        self.gaussians.load_ply(ply_path)
+
+        if self.scene_history_enabled:
+            configured_dir = self.scene_history_dir
+            checkpoint_history_dir = checkpoint.get("scene_history_dir", None)
+            history_candidates = [configured_dir]
+            if checkpoint_history_dir:
+                history_candidates.append(str(checkpoint_history_dir))
+                history_candidates.append(
+                    os.path.join(
+                        checkpoint_dir,
+                        os.path.basename(os.path.normpath(str(checkpoint_history_dir))),
+                    )
+                )
+            history_dir = next(
+                (
+                    candidate
+                    for candidate in history_candidates
+                    if os.path.isdir(candidate)
+                    and any(Path(candidate).glob("t*.pt"))
+                ),
+                configured_dir,
+            )
+            self.scene_history_dir = history_dir
+            records = HistoryRecorder.load(history_dir)
+            records = [
+                record
+                for record in records
+                if int(record.timestep) <= int(self.timestep)
+            ]
+            if self.timestep > 0 and not records:
+                raise FileNotFoundError(
+                    "Exact history is enabled, but no records were found for "
+                    f"checkpoint t={self.timestep} in {history_candidates}."
+                )
+            if records and int(records[-1].timestep) != int(self.timestep):
+                raise ValueError(
+                    "Checkpoint/history mismatch: checkpoint is at "
+                    f"t={self.timestep}, latest history is t={records[-1].timestep}."
+                )
+            self.scene_history = HistoryRecorder(records)
         
         logger.info(f"Loaded checkpoint from {path}")
 
