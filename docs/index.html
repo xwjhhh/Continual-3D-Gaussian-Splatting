@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="IRC-GS qualitative comparison on the Community scene.">
+  <meta name="theme-color" content="#111614">
+  <title>IRC-GS | Community</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #111614;
+      --muted: #5d6863;
+      --paper: #f7f8f5;
+      --line: #d9dfdb;
+      --accent: #147d64;
+      --surface: #ffffff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .topbar {
+      border-bottom: 1px solid var(--line);
+      background: rgba(247, 248, 245, 0.96);
+    }
+
+    .topbar__inner,
+    main,
+    footer {
+      width: min(1180px, calc(100% - 40px));
+      margin-inline: auto;
+    }
+
+    .topbar__inner {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .brand {
+      font-size: 18px;
+      font-weight: 750;
+      text-decoration: none;
+    }
+
+    .repo-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .repo-link:hover,
+    .repo-link:focus-visible {
+      color: var(--accent);
+    }
+
+    .repo-link svg {
+      width: 18px;
+      height: 18px;
+      flex: none;
+      fill: currentColor;
+    }
+
+    main {
+      padding-block: 62px 44px;
+    }
+
+    .heading {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 430px);
+      align-items: end;
+      gap: 48px;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(42px, 8vw, 78px);
+      font-weight: 500;
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+
+    .summary {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    .viewer {
+      overflow: hidden;
+      border: 1px solid #222a27;
+      border-radius: 6px;
+      background: #050706;
+      box-shadow: 0 18px 44px rgba(17, 22, 20, 0.12);
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #050706;
+      object-fit: contain;
+    }
+
+    .caption {
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      padding-top: 16px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .caption strong {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      border-top: 1px solid var(--line);
+      padding-block: 22px 30px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    footer a:hover,
+    footer a:focus-visible {
+      color: var(--accent);
+    }
+
+    @media (max-width: 760px) {
+      .topbar__inner,
+      main,
+      footer {
+        width: min(100% - 24px, 1180px);
+      }
+
+      .topbar__inner {
+        min-height: 56px;
+      }
+
+      main {
+        padding-block: 40px 32px;
+      }
+
+      .heading {
+        grid-template-columns: 1fr;
+        gap: 20px;
+      }
+
+      h1 {
+        font-size: 48px;
+      }
+
+      .caption,
+      footer {
+        flex-direction: column;
+        gap: 6px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__inner">
+      <a class="brand" href="./">IRC-GS</a>
+      <a class="repo-link" href="https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting" aria-label="Open the IRC-GS GitHub repository">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.22c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.28-1.7-1.28-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.57-.3-5.28-1.29-5.28-5.69 0-1.26.45-2.29 1.19-3.1-.12-.3-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.18a10.9 10.9 0 0 1 5.76 0c2.2-1.49 3.16-1.18 3.16-1.18.63 1.6.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.41-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/>
+        </svg>
+        GitHub
+      </a>
+    </div>
+  </header>
+
+  <main>
+    <section class="heading" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow">Qualitative comparison</p>
+        <h1 id="page-title">Community</h1>
+      </div>
+      <p class="summary">
+        A continual 3D Gaussian Splatting comparison rendered along the same
+        camera trajectory for every displayed method.
+      </p>
+    </section>
+
+    <section aria-label="Community comparison video">
+      <div class="viewer">
+        <video controls playsinline preload="metadata">
+          <source src="https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/community.mp4" type="video/mp4">
+          Your browser does not support HTML5 video.
+        </video>
+      </div>
+      <div class="caption">
+        <span><strong>Scene:</strong> Community</span>
+        <span>IRC-GS qualitative result</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Inheritance, Revision, and Consolidation for Continual 3D Gaussian Splatting</span>
+    <a href="https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting">Source code</a>
+  </footer>
+</body>
+</html>

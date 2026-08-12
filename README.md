@@ -26,7 +26,7 @@ full-resolution result.
 | Scene | Video | Scene | Video |
 |:--|:--:|:--|:--:|
 | Breville | [MP4](videos/breville.mp4) | Car | [MP4](videos/car.mp4) |
-| Community | [MP4](videos/community.mp4) | Grill | [MP4](videos/grill.mp4) |
+| Community | [Watch online](https://xwjhhh.github.io/Continual-3D-Gaussian-Splatting/) / [MP4](videos/community.mp4) | Grill | [MP4](videos/grill.mp4) |
 | Living room | [MP4](videos/living_room.mp4) | Street | [MP4](videos/street.mp4) |
 
 ## Supported Methods
