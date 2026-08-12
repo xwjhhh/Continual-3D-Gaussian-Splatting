@@ -20,8 +20,8 @@ On ten World Across Time scenes, IRC-GS reaches **28.14 dB PSNR** and
 ## Results
 
 The comparison videos use the same camera trajectory for all displayed
-methods. MP4 files are stored with Git LFS; click a scene name to open the
-full-resolution result.
+methods. Use **Watch online** for browser playback through the project result
+viewer, or **MP4** to download the full-resolution video tracked with Git LFS.
 
 | Scene | Video | Scene | Video |
 |:--|:--:|:--|:--:|
@@ -29,12 +29,12 @@ full-resolution result.
 | Community | [Watch online][watch-community] / [MP4](videos/community.mp4) | Grill | [Watch online][watch-grill] / [MP4](videos/grill.mp4) |
 | Living room | [Watch online][watch-living-room] / [MP4](videos/living_room.mp4) | Street | [Watch online][watch-street] / [MP4](videos/street.mp4) |
 
-[watch-breville]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#breville
-[watch-car]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#car
-[watch-community]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#community
-[watch-grill]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#grill
-[watch-living-room]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#living-room
-[watch-street]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#street
+[watch-breville]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#breville
+[watch-car]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#car
+[watch-community]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#community
+[watch-grill]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#grill
+[watch-living-room]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#living-room
+[watch-street]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#street
 
 ## Supported Methods
 
@@ -79,24 +79,50 @@ conda activate irc-gs
 pip install -e submodules/diff-gaussian-rasterization --no-build-isolation
 pip install -e submodules/simple-knn --no-build-isolation
 pip install -e Scaffold-GS-main/submodules/diff-gaussian-rasterization --no-build-isolation
+pip install -r requirements.txt
+pip install einops
 ```
+
+`Scaffold-GS-main` also imports `torch-scatter`. Install a wheel matching the
+PyTorch and CUDA versions in your environment; for example, for PyTorch 2.7.0
+with CUDA 12.6:
+
+```bash
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.7.0+cu126.html
+```
+
+Install the two `diff_gaussian_rasterization` extensions in the order shown
+above. The Scaffold-GS copy must be installed last because it provides the
+custom `exact_importance` interface used by IRC-GS. `laspy` is optional and is
+only needed for LAS point-cloud inputs.
 
 The 4DGS baseline has additional CUDA modules documented in
 [`4DGaussians-master/README.md`](4DGaussians-master/README.md).
 
 ## Data
 
-Set `DATA_ROOT` to the World Across Time root. Each scene is expected to contain
-the timestep image folders and COLMAP reconstruction consumed by the dataset
-reader. Data is never tracked by Git.
+Set `DATA_ROOT` to the World Across Time (WAT) root. Data is never tracked by
+Git. The preferred layout is one COLMAP reconstruction per timestep:
 
 ```text
 /path/to/WAT/
-|-- breville/
-|-- kitchen/
-|-- living_room/
-`-- ...
+`-- breville/
+    |-- t0/
+    |   |-- images_undist/
+    |   `-- sparse_undist/0/
+    |       |-- cameras.bin
+    |       |-- images.bin
+    |       `-- points3D.bin
+    |-- t1/
+    |   |-- images_undist/
+    |   `-- sparse_undist/0/
+    `-- ...
 ```
+
+The reader also accepts `images/t0`, `images/t1`, ... with a shared root
+`sparse/0`, or a single-timestep `images/` + `sparse/0` dataset. When both
+variants exist, `images_undist` and `sparse_undist` are preferred. A typical
+AutoDL path is `/root/autodl-tmp/Continual-3D-Gaussian-Splatting-main/data/cl-splats/WAT`.
 
 ## Training
 
@@ -110,8 +136,14 @@ DATA_ROOT=/path/to/WAT METHOD=3dgs ONLY_SCENES=breville bash run.sh
 DATA_ROOT=/path/to/WAT METHOD=4dgs ONLY_SCENES=breville bash run.sh
 ```
 
-Use `METHOD=all` for the complete comparison. Multiple scenes are passed as a
-comma-separated list, for example `ONLY_SCENES=breville,kitchen,living_room`.
+Use `METHOD=all` for the complete comparison. This runs IRC-GS, CL-Splats,
+Scaffold-GS, 3DGS, and 4DGS sequentially, so all baseline-specific CUDA
+extensions and dependencies must be installed first. In particular, 4DGS has
+additional modules documented in [`4DGaussians-master/README.md`](4DGaussians-master/README.md),
+and the official CL-Splats code under `cl-splats-main/` may require its own
+environment adjustments. For a first check, run `METHOD=irc-gs` alone, then
+add baselines one at a time. Multiple scenes are passed as a comma-separated
+list, for example `ONLY_SCENES=breville,kitchen,living_room`.
 The main controls can be overridden with environment variables:
 
 ```bash
@@ -124,7 +156,12 @@ bash run.sh
 ```
 
 Checkpoints, rendered images, logs, and metric summaries are written below
-`outputs/<method>/<scene>/` and remain ignored by Git.
+`outputs/<method_slug>/<scene>/`. The runner replaces `-` with `_`, so the
+default examples are `outputs/irc_gs/breville/`,
+`outputs/scaffold_gs/breville/`, and `outputs/cl_splats_official_30k/breville/`.
+These generated artifacts remain ignored by Git. For IRC-GS, timestep 0 uses
+`BASE_ITERS + T0_IMPORTANCE_ADAPT_ITERS` iterations (the default is
+`30000 + 5000 = 35000`); later timesteps use `INC_ITERS`.
 
 ## Git LFS
 
@@ -132,7 +169,7 @@ Install Git LFS before cloning if you need the comparison videos:
 
 ```bash
 git lfs install
-git clone https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting.git
+git clone https://github.com/xwjhhh/IRC-GS.git
 ```
 
 A normal source clone without the video payload can use
