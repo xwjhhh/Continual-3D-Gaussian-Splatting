@@ -31,6 +31,7 @@ DATA_ROOT="${DATA_ROOT:-${REPO_DIR}/data/cl-splats/WAT}"
 NUM_TIMES="${NUM_TIMES:-10}"
 BASE_ITERS="${BASE_ITERS:-30000}"
 INC_ITERS="${INC_ITERS:-30000}"
+T0_IMPORTANCE_PRUNE_ITERATION="${T0_IMPORTANCE_PRUNE_ITERATION:-25000}"
 T0_IMPORTANCE_ADAPT_ITERS="${T0_IMPORTANCE_ADAPT_ITERS:-5000}"
 TEMPORAL_STAGE1_UNTIL="${TEMPORAL_STAGE1_UNTIL:-10000}"
 TEMPORAL_STAGE2_UNTIL="${TEMPORAL_STAGE2_UNTIL:-25000}"
@@ -276,7 +277,7 @@ print(f"[IMPORTANT] scene={scene_name} copied_test_images={copied} status={copy_
 PY
 }
 
-INTEGER_NAMES=(NUM_TIMES BASE_ITERS INC_ITERS T0_IMPORTANCE_ADAPT_ITERS SAVE_INTERVAL CHANGE_DILATE_KERNEL LIFTER_VOTE_THRESHOLD PRUNING_MIN_CLUSTER_SIZE)
+INTEGER_NAMES=(NUM_TIMES BASE_ITERS INC_ITERS T0_IMPORTANCE_PRUNE_ITERATION T0_IMPORTANCE_ADAPT_ITERS SAVE_INTERVAL CHANGE_DILATE_KERNEL LIFTER_VOTE_THRESHOLD PRUNING_MIN_CLUSTER_SIZE)
 if [[ "${USES_IRCGS_TEMPORAL_STAGES}" == "1" ]]; then
   INTEGER_NAMES+=(TEMPORAL_STAGE1_UNTIL TEMPORAL_STAGE2_UNTIL)
 fi
@@ -287,6 +288,11 @@ for INTEGER_NAME in "${INTEGER_NAMES[@]}"; do
     exit 2
   fi
 done
+if (( T0_IMPORTANCE_PRUNE_ITERATION + T0_IMPORTANCE_ADAPT_ITERS != BASE_ITERS )); then
+  echo "[ERROR] T0_IMPORTANCE_PRUNE_ITERATION + T0_IMPORTANCE_ADAPT_ITERS must equal BASE_ITERS."
+  echo "[ERROR] Got ${T0_IMPORTANCE_PRUNE_ITERATION} + ${T0_IMPORTANCE_ADAPT_ITERS} != ${BASE_ITERS}."
+  exit 2
+fi
 if [[ ! "${SPLIT_SEED}" =~ ^[0-9]+$ ]]; then
   echo "[ERROR] SPLIT_SEED must be a non-negative integer, got '${SPLIT_SEED}'."
   exit 2
@@ -320,7 +326,7 @@ echo "[INFO] Data root  : ${DATA_ROOT}"
 echo "[INFO] Num times  : ${NUM_TIMES}"
 echo "[INFO] Base iters : ${BASE_ITERS}"
 echo "[INFO] Inc iters  : ${INC_ITERS}"
-echo "[INFO] T0 schedule: train=1..${BASE_ITERS}, consolidate=$((BASE_ITERS + 1))..$((BASE_ITERS + T0_IMPORTANCE_ADAPT_ITERS)) (${T0_IMPORTANCE_ADAPT_ITERS} extra iters)"
+echo "[INFO] T0 schedule: train=1..${T0_IMPORTANCE_PRUNE_ITERATION}, consolidate=${T0_IMPORTANCE_PRUNE_ITERATION}, adapt=$((T0_IMPORTANCE_PRUNE_ITERATION + 1))..${BASE_ITERS} (${T0_IMPORTANCE_ADAPT_ITERS} iters, included in base budget)"
 echo "[INFO] T1 densify : ${TEMPORAL_DENSIFICATION_ENABLED} (0 keeps only the one-time DINO clones)"
 if [[ "${USES_IRCGS_TEMPORAL_STAGES}" == "1" ]]; then
   echo "[INFO] IRC-GS stages: inherit=1..${TEMPORAL_STAGE1_UNTIL}, revise=$((TEMPORAL_STAGE1_UNTIL + 1))..${TEMPORAL_STAGE2_UNTIL}, consolidate=${TEMPORAL_STAGE2_UNTIL}, adapt=$((TEMPORAL_STAGE2_UNTIL + 1))..${INC_ITERS}"
@@ -406,6 +412,7 @@ for SCENE in "${SCENES[@]}"; do
     "++train.iterations=${BASE_ITERS}"
     "++train.incremental_iterations=${INC_ITERS}"
     "++train.t0_importance_prune_enabled=true"
+    "++train.t0_importance_prune_iteration=${T0_IMPORTANCE_PRUNE_ITERATION}"
     "++train.t0_importance_adapt_iters=${T0_IMPORTANCE_ADAPT_ITERS}"
     "++change_detection.threshold=${CHANGE_THRESHOLD}"
     "++change_detection.dilate_mask=true"

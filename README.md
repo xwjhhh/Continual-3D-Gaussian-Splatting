@@ -166,9 +166,10 @@ Checkpoints, rendered images, logs, and metric summaries are written below
 `outputs/<method_slug>/<scene>/`. The runner replaces `-` with `_`, so the
 default examples are `outputs/irc_gs/breville/`,
 `outputs/scaffold_gs/breville/`, and `outputs/cl_splats_official_30k/breville/`.
-These generated artifacts remain ignored by Git. For IRC-GS, timestep 0 uses
-`BASE_ITERS + T0_IMPORTANCE_ADAPT_ITERS` iterations (the default is
-`30000 + 5000 = 35000`); later timesteps use `INC_ITERS`.
+These generated artifacts remain ignored by Git. For IRC-GS, timestep 0 trains
+through iteration `25000`, applies the importance correction at iteration
+`25000`, and continues adaptation from `25001` through `30000`. The total
+timestep-0 budget remains `30000` iterations; later timesteps use `INC_ITERS`.
 
 ## Git LFS
 
@@ -181,6 +182,23 @@ git clone https://github.com/xwjhhh/IRC-GS.git
 
 A normal source clone without the video payload can use
 `GIT_LFS_SKIP_SMUDGE=1`.
+
+## GitHub Pages
+
+The browser video viewer in `docs/` is deployed by
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml). The first time
+you use it, enable Pages once in the repository settings:
+
+1. Open **Settings -> Pages** for `xwjhhh/IRC-GS`.
+2. Under **Build and deployment**, set **Source** to **GitHub Actions**.
+3. Return to **Actions**, select **Deploy Community video page**, and choose
+   **Run workflow** (or push a change under `docs/`).
+
+The `configure-pages` error `Get Pages site failed (404)` means this setting
+has not been enabled yet. It is a repository configuration issue, not a code
+or Git LFS upload failure. After deployment, the viewer is available at
+`https://xwjhhh.github.io/IRC-GS/` (the README links use the HTML preview URL
+as a fallback).
 
 ## License
 
