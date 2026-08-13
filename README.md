@@ -25,16 +25,23 @@ viewer, or **MP4** to download the full-resolution video tracked with Git LFS.
 
 | Scene | Video | Scene | Video |
 |:--|:--:|:--|:--:|
-| Breville | [Watch online][watch-breville] / [MP4](videos/breville.mp4) | Car | [Watch online][watch-car] / [MP4](videos/car.mp4) |
-| Community | [Watch online][watch-community] / [MP4](videos/community.mp4) | Grill | [Watch online][watch-grill] / [MP4](videos/grill.mp4) |
-| Living room | [Watch online][watch-living-room] / [MP4](videos/living_room.mp4) | Street | [Watch online][watch-street] / [MP4](videos/street.mp4) |
+| Breville | [Watch online][watch-breville] / [MP4][mp4-breville] | Car | [Watch online][watch-car] / [MP4][mp4-car] |
+| Community | [Watch online][watch-community] / [MP4][mp4-community] | Grill | [Watch online][watch-grill] / [MP4][mp4-grill] |
+| Living room | [Watch online][watch-living-room] / [MP4][mp4-living-room] | Street | [Watch online][watch-street] / [MP4][mp4-street] |
 
-[watch-breville]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#breville
-[watch-car]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#car
-[watch-community]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#community
-[watch-grill]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#grill
-[watch-living-room]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#living-room
-[watch-street]: https://htmlpreview.github.io/?https://github.com/xwjhhh/IRC-GS/blob/main/docs/index.html#street
+[watch-breville]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#breville
+[watch-car]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#car
+[watch-community]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#community
+[watch-grill]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#grill
+[watch-living-room]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#living-room
+[watch-street]: https://htmlpreview.github.io/?https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting/blob/main/docs/index.html#street
+
+[mp4-breville]: https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/breville.mp4
+[mp4-car]: https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/car.mp4
+[mp4-community]: https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/community.mp4
+[mp4-grill]: https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/grill.mp4
+[mp4-living-room]: https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/living_room.mp4
+[mp4-street]: https://media.githubusercontent.com/media/xwjhhh/Continual-3D-Gaussian-Splatting/main/videos/street.mp4
 
 ## Supported Methods
 
@@ -169,7 +176,7 @@ Install Git LFS before cloning if you need the comparison videos:
 
 ```bash
 git lfs install
-git clone https://github.com/xwjhhh/IRC-GS.git
+git clone https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting.git
 ```
 
 A normal source clone without the video payload can use
