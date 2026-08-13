@@ -17,6 +17,6 @@ authors:
     given-names: Zijian
   - family-names: Du
     given-names: Jianning
-repository-code: "https://github.com/xwjhhh/Continual-3D-Gaussian-Splatting"
+repository-code: "https://github.com/xwjhhh/IRC-GS"
 version: 0.1.0
 date-released: 2026-08-12
